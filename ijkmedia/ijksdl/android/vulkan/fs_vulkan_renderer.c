@@ -203,6 +203,16 @@ struct FSVulkanRenderer {
     float video_uvmat[4];           /* 2x2 列主序，uv' = M * (uv - 0.5) + 0.5（保留兼容） */
     float video_posmat[4];          /* 2x2 列主序，pos' = M * pos：三轴旋转（含自动 Z） */
 
+    /*
+     * 显示内容旋转（度，0/90/180/270）：来自 swapchain 的 contentRot。
+     * 合成器已经把 surface 内容按它转过，画面变换里要再左乘一次转正，
+     * 见 compute_video_transform。
+     */
+    int   content_rot;
+    /* 下面两个只供 swapchain transform 那条日志使用（见 set_surface） */
+    int   surface_current_transform;
+    int   surface_pre_transform;
+
     /* 上一帧的画面：快照要用同样的管线和参数重画一次 */
     int              video_w, video_h;      /* 解码帧原始尺寸 */
     int              last_rot;              /* 归一化到 0/90/180/270 */
@@ -922,7 +932,7 @@ static VkResult create_command_and_sync(FSVulkanRenderer *r)
 /* 纹理上传                                                                   */
 /* ------------------------------------------------------------------------- */
 
-static VkResult ensure_yuv_textures(FSVulkanRenderer *r, int w, int h, int is10bit)
+static __attribute__((always_inline)) inline VkResult ensure_yuv_textures(FSVulkanRenderer *r, int w, int h, int is10bit)
 {
     if (r->tex_w == w && r->tex_h == h && r->tex10bit == is10bit && r->y_image != VK_NULL_HANDLE)
         return VK_SUCCESS;
@@ -3150,7 +3160,7 @@ static void compute_video_transform(FSVulkanRenderer *r, int frame_w, int frame_
     r->video_h = frame_h;
 
     /* 总 Z 旋转（度）：手动 + 自动。和 iOS FSMetalView 的 zDegrees 同义 */
-    float total_z = r->z_rotate_degrees + (float)auto_z_degrees;
+    float total_z = r->z_rotate_degrees + (float)auto_z_degrees + (float)r->content_rot;
     int total_z_deg = (int)total_z;
     r->last_rot = ((total_z_deg % 360) + 360) % 360;
     int swap_wh = (((total_z_deg >= 0 ? total_z_deg : -total_z_deg) / 90) % 2) == 1;
@@ -3214,6 +3224,21 @@ static void compute_video_transform(FSVulkanRenderer *r, int frame_w, int frame_
         float M10 = -s * a00 + c * a10;
         float M11 = -s * a01 + c * a11;
 
+        /*
+         * 显示内容旋转（contentRot，0/90/180/270）：合成器已经按这个角度转过
+         * surface 内容，这里用与 auto_z 完全相同的乘法序再左乘一次 Rz 把画面转正。
+         * 为 0 时整段跳过（连 sincosf 都不算）。
+         */
+        if (r->content_rot != 0) {
+            float rot_rad = (float)r->content_rot * DEG2RAD;
+            float ec = cosf(rot_rad), es = sinf(rot_rad);
+            float N00 = ec * M00 + es * M10;
+            float N01 = ec * M01 + es * M11;
+            float N10 = -es * M00 + ec * M10;
+            float N11 = -es * M01 + ec * M11;
+            M00 = N00; M01 = N01; M10 = N10; M11 = N11;
+        }
+
         /* shader 里 mat2(x,y,z,w) 是列主序：col0=(x,y)=(M00,M10)，col1=(z,w)=(M01,M11) */
         posmat[0] = M00; posmat[1] = M10;
         posmat[2] = M01; posmat[3] = M11;
@@ -3253,19 +3278,30 @@ int fs_vulkan_renderer_display(FSVulkanRenderer *r, const AVFrame *frame,
                                int disp_w, int disp_h,
                                int rotate_degrees, int sar_num, int sar_den)
 {
-    if (!r || !r->surface_ready || !frame)
+    /* r 为空时连锁都没得加，必须先挡掉再进临界区 */
+    if (!r)
         return -1;
+
+    /* sync + present 全程挡住 set_surface；递归锁允许 display_sub_overlay 重入 */
+    pthread_mutex_lock(&r->surface_mutex);
+
+    int ret = -1;
+
+    if (!frame || !r->surface_ready)
+        goto out;
 
     /* surface 可能被 resize：先在建帧变换之前重建，确保后面用的是最新的 drawable 尺寸 */
     if (fs_vulkan_renderer_sync_surface(r) != 0 || !r->surface_ready)
-        return -1;
+        goto out;
 
     compute_video_transform(r, frame->width, frame->height, disp_w, disp_h,
                             rotate_degrees, sar_num, sar_den);
 
     /* MediaCodec 硬解：零拷贝外部显存通路 */
-    if (frame->format == AV_PIX_FMT_MEDIACODEC)
-        return display_mc_frame(r, frame);
+    if (frame->format == AV_PIX_FMT_MEDIACODEC) {
+        ret = display_mc_frame(r, frame);
+        goto out;
+    }
 
     /*
      * HDR 判定对齐 iOS FSMetalPipelineMeta：YCbCr 矩阵是 BT.2020 就算 HDR，
@@ -3287,16 +3323,20 @@ int fs_vulkan_renderer_display(FSVulkanRenderer *r, const AVFrame *frame,
     const uint8_t *y, *u, *v;
     int y_stride, u_stride, v_stride, w, h, is10bit = 0;
     if (ensure_yuv420p(r, frame, &y, &y_stride, &u, &u_stride, &v, &v_stride, &w, &h, &is10bit) != 0)
-        return -1;
+        goto out;
 
     if (ensure_yuv_textures(r, w, h, is10bit) != VK_SUCCESS)
-        return -1;
+        goto out;
 
     if (upload_yuv420p(r, y, y_stride, u, u_stride, v, v_stride, w, h, is10bit ? 2 : 1) != VK_SUCCESS)
-        return -1;
+        goto out;
 
-    return draw_and_present(r, r->pipeline, r->pipeline_layout, r->descriptor_set,
-                            VK_NULL_HANDLE);
+    ret = draw_and_present(r, r->pipeline, r->pipeline_layout, r->descriptor_set,
+                           VK_NULL_HANDLE);
+
+out:
+    pthread_mutex_unlock(&r->surface_mutex);
+    return ret;
 }
 
 /*
