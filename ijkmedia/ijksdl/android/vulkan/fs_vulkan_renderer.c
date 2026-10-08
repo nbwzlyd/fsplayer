@@ -3236,7 +3236,13 @@ static void compute_video_transform(FSVulkanRenderer *r, int frame_w, int frame_
     float total_z = r->z_rotate_degrees + (float)auto_z_degrees + (float)r->content_rot;
     int total_z_deg = (int)total_z;
     r->last_rot = ((total_z_deg % 360) + 360) % 360;
-    int swap_wh = (((total_z_deg >= 0 ? total_z_deg : -total_z_deg) / 90) % 2) == 1;
+    /*
+     * 宽高置换只看内容自身的旋转（手动 + 自动）：contentRot 是给合成器的补偿量，
+     * 画面转置由合成器完成，这里再换一次会把 letterbox 算反，横屏时画面会被
+     * 压成又宽又扁的一条（dw/dh 被换成 1080x2003，nh 只剩 0.29）。
+     */
+    int content_z_deg = (int)(r->z_rotate_degrees + (float)auto_z_degrees);
+    int swap_wh = (((content_z_deg >= 0 ? content_z_deg : -content_z_deg) / 90) % 2) == 1;
 
     int fw = disp_w > 0 ? disp_w : frame_w;
     int fh = disp_h > 0 ? disp_h : frame_h;
