@@ -523,6 +523,12 @@ typedef struct FFPlayer {
     SDL_Aout *aout;
     SDL_Vout *vout;
     struct SDL_GPU  *gpu;
+    /*
+     * 惰性获取字幕 GPU：各平台注入（Android 见 ijkmp_android_create）。
+     * 创建播放器时不再立刻建字幕纹理层，而是第一次真正要画字幕时
+     * 通过这个回调去取（内部再走 SDL_VoutAndroid_GetGPU 的懒创建）。
+     */
+    struct SDL_GPU *(*get_gpu)(struct FFPlayer *ffp);
     struct FS_Pipeline *pipeline;
     struct FS_Pipenode *node_vdec;
 

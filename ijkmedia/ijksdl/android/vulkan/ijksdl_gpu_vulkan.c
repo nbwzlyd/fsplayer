@@ -44,6 +44,7 @@
 #include "ijksdl/ijksdl_log.h"
 
 #include "libavutil/mem.h"
+#include "libavutil/time.h"
 
 #include "../../ijkplayer/ff_subtitle_def.h"
 
@@ -1018,6 +1019,8 @@ SDL_GPU *SDL_VulkanGPU_Create(const FSVulkanContext *ctx)
     g->ctx = *ctx;
     g->vk_alive = 1;
 
+    int64_t create_start = av_gettime_relative();
+
     VkDevice dev = ctx->device;
 
     VkSamplerCreateInfo sci = {
@@ -1114,7 +1117,8 @@ SDL_GPU *SDL_VulkanGPU_Create(const FSVulkanContext *ctx)
     gpu->createFBO = fsvk_create_fbo;
     gpu->dealloc = fsvk_gpu_dealloc;
 
-    ALOGI("SDL_GPU(vulkan): ready\n");
+    ALOGI("SDL_GPU(vulkan): ready in %dms",
+          (int)((av_gettime_relative() - create_start) / 1000));
     return gpu;
 
 fail:

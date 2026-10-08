@@ -41,6 +41,7 @@
 struct SDL_Vout_Opaque {
     FSVulkanRenderer *renderer;
     SDL_GPU *gpu;                 /* 字幕用的纹理/FBO 层（跑在同一个 Vulkan device 上）*/
+    int gpu_failed;               /* 建过一次失败就不再重试，避免每帧都白试一遍 */
     ANativeWindow *native_window;
 
 #if IS_TILEGRID_HEIC_ENABLED
@@ -330,15 +331,6 @@ SDL_Vout *SDL_VoutAndroid_CreateForVulkan(void)
         return NULL;
     }
 
-    /*
-     * 字幕用的 SDL_GPU：和渲染器共用同一个 Vulkan device/queue，
-     * 这样字幕纹理不用跨设备拷贝。失败也不致命（只影响字幕）。
-     */
-    opaque->gpu = SDL_VulkanGPU_Create(fs_vulkan_renderer_context(opaque->renderer));
-    if (!opaque->gpu) {
-        ALOGW("SDL_VoutAndroid_CreateForVulkan: subtitle gpu unavailable\n");
-    }
-
     vout->create_overlay = vout_create_overlay;
     vout->free_l = vout_free_l;
     vout->display_overlay = vout_display_overlay;
@@ -474,6 +466,23 @@ SDL_GPU *SDL_VoutAndroid_GetGPU(SDL_Vout *vout)
 {
     if (!vout || !vout->opaque)
         return NULL;
+
+    if (vout->opaque->gpu)
+        return vout->opaque->gpu;
+
+    if (vout->opaque->gpu_failed)
+        return NULL;
+
+    /*
+     * 字幕用的 SDL_GPU：和渲染器共用同一个 Vulkan device/queue，
+     * 这样字幕纹理不用跨设备拷贝。失败也不致命（只影响字幕），
+     * 所以延迟到真正需要字幕时才创建，省掉不用字幕时的开销。
+     */
+    vout->opaque->gpu = SDL_VulkanGPU_Create(fs_vulkan_renderer_context(vout->opaque->renderer));
+    if (!vout->opaque->gpu) {
+        vout->opaque->gpu_failed = 1;
+        ALOGW("SDL_VoutAndroid_GetGPU: subtitle gpu unavailable\n");
+    }
 
     /* 借用：所有权在 ffplayer，vout 只负责销毁前 detach（见 vout_free_l） */
     return vout->opaque->gpu;

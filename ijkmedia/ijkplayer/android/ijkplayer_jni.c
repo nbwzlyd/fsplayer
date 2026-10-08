@@ -39,9 +39,9 @@
 #include "ijksdl/android/ijksdl_android_jni.h"
 #include "ijkavformat/ijkavformat.h"
 
-#define JNI_MODULE_PACKAGE      "tv/danmaku/ijk/media/player"
-#define JNI_CLASS_IJKPLAYER     "tv/danmaku/ijk/media/player/IjkMediaPlayer"
-#define JNI_IJK_MEDIA_EXCEPTION "tv/danmaku/ijk/media/player/exceptions/IjkMediaException"
+#define JNI_MODULE_PACKAGE      "com/github/tvbox/fsp/player"
+#define JNI_CLASS_IJKPLAYER     "com/github/tvbox/fsp/player/IjkMediaPlayer"
+#define JNI_IJK_MEDIA_EXCEPTION "com/github/tvbox/fsp/player/exceptions/IjkMediaException"
 
 #define IJK_CHECK_MPRET_GOTO(retval, env, label) \
     JNI_CHECK_GOTO((retval != EIJK_INVALID_STATE), env, "java/lang/IllegalStateException", NULL, label); \
@@ -1745,8 +1745,8 @@ static JNINativeMethod g_methods[] = {
         (void *) IjkMediaPlayer_setDataSourceAndHeaders
     },
     { "_setDataSourceFd",       "(I)V",     (void *) IjkMediaPlayer_setDataSourceFd },
-    { "_setDataSource",         "(Ltv/danmaku/ijk/media/player/misc/IMediaDataSource;)V", (void *)IjkMediaPlayer_setDataSourceCallback },
-    { "_setAndroidIOCallback",  "(Ltv/danmaku/ijk/media/player/misc/IAndroidIO;)V", (void *)IjkMediaPlayer_setAndroidIOCallback },
+    { "_setDataSource",         "(Lcom/github/tvbox/fsp/player/misc/IMediaDataSource;)V", (void *)IjkMediaPlayer_setDataSourceCallback },
+    { "_setAndroidIOCallback",  "(Lcom/github/tvbox/fsp/player/misc/IAndroidIO;)V", (void *)IjkMediaPlayer_setAndroidIOCallback },
 
     { "_setVideoSurface",       "(Landroid/view/Surface;)V", (void *) IjkMediaPlayer_setVideoSurface },
     { "_prepareAsync",          "()V",      (void *) IjkMediaPlayer_prepareAsync },
@@ -1794,7 +1794,7 @@ static JNINativeMethod g_methods[] = {
     { "loadThenActiveSubtitle",   "(Ljava/lang/String;)Z",    (void *) IjkMediaPlayer_loadThenActiveSubtitle },
     { "addOnlyExternalSubtitle",  "(Ljava/lang/String;)I",    (void *) IjkMediaPlayer_addOnlyExternalSubtitle },
     { "addOnlyExternalSubtitles", "([Ljava/lang/String;)I",   (void *) IjkMediaPlayer_addOnlyExternalSubtitles },
-    { "setSubtitlePreference",    "(Ltv/danmaku/ijk/media/player/FSSubtitlePreference;)V", (void *) IjkMediaPlayer_setSubtitlePreference },
+    { "setSubtitlePreference",    "(Lcom/github/tvbox/fsp/player/FSSubtitlePreference;)V", (void *) IjkMediaPlayer_setSubtitlePreference },
     { "stepToNextFrame",          "()V",                      (void *) IjkMediaPlayer_stepToNextFrame },
     { "enableAccurateSeek",       "(Z)V",                     (void *) IjkMediaPlayer_enableAccurateSeek },
     { "getPlayableDuration",      "()J",                      (void *) IjkMediaPlayer_getPlayableDuration },

@@ -534,7 +534,9 @@ static void video_image_display2(FFPlayer *ffp)
             int r = ff_apply_subtitle_stream_change(ffp);
             //has stream
             if (ffp->subtitle_mix && ff_sub_get_current_stream(is->ffSub, NULL) >= 0) {
-                int got = ff_sub_get_texture(is->ffSub, vp->pts, ffp->gpu, &sub_overlay);
+                /* GPU 纹理层是懒创建的：每帧通过平台注入的回调去取，没有回调就退回 gpu 字段 */
+                SDL_GPU *gpu = ffp->get_gpu ? ffp->get_gpu(ffp) : ffp->gpu;
+                int got = ff_sub_get_texture(is->ffSub, vp->pts, gpu, &sub_overlay);
                 //when got equal to -100 means the ass subtitle frame not ready,need retry!
                 if (!sub_overlay && (r > 0 || got == FF_SUB_PENDING) && is->pause_req) {
                     //give one more chance

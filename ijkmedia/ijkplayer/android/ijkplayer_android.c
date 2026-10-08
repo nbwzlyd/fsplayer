@@ -31,6 +31,17 @@
 #include "../pipeline/ffpipeline_ffplay.h"
 #include "pipeline/ffpipeline_android.h"
 
+/*
+ * 惰性 GPU 取值器：注册到 ffplayer->get_gpu，渲染线程第一次要画字幕时才
+ * 真正建 SDL_GPU（见 SDL_VoutAndroid_GetGPU），失败也不会每帧重试。
+ */
+static struct SDL_GPU *ijkmp_android_get_gpu(FFPlayer *ffp)
+{
+    if (!ffp || !ffp->vout)
+        return NULL;
+    return SDL_VoutAndroid_GetGPU(ffp->vout);
+}
+
 IjkMediaPlayer *ijkmp_android_create(int(*msg_loop)(void*))
 {
     IjkMediaPlayer *mp = ijkmp_create(msg_loop);
@@ -44,15 +55,9 @@ IjkMediaPlayer *ijkmp_android_create(int(*msg_loop)(void*))
     /*
      * 字幕纹理层（SDL_GPU）：和 vout 的 Vulkan 渲染器共用 device/queue，
      * 对应 iOS 在 ijkmp_ios_set_glview_l 里调 SDL_CreateGPU_WithContext。
-     * 所有权归 ffplayer，由 ffp_destroy 里的 SDL_GPUFreeP 释放。
+     * 这里只注入懒获取回调，不立刻创建——不用字幕时不付这份开销。
      */
-    mp->ffplayer->gpu = SDL_VoutAndroid_GetGPU(mp->ffplayer->vout);
-    if (mp->ffplayer->gpu) {
-        ALOGI("subtitle gpu ready\n");
-    } else {
-        mp->ffplayer->subtitle_mix = 0;
-        ALOGE("video rendering not provide gpu context,subtile feature will be disabled");
-    }
+    mp->ffplayer->get_gpu = ijkmp_android_get_gpu;
 
     /* 缩放模式（等比完整显示/铺满/拉伸），之后可通过 setPropertyInt64 改 */
     SDL_VoutAndroid_SetScalingMode(mp->ffplayer->vout, mp->ffplayer->video_scaling_mode);

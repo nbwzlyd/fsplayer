@@ -142,7 +142,7 @@ int J4A_loadClass__J4AC_tv_danmaku_ijk_media_player_misc_IAndroidIO(JNIEnv *env)
     if (class_J4AC_tv_danmaku_ijk_media_player_misc_IAndroidIO.id != NULL)
         return 0;
 
-    sign = "tv/danmaku/ijk/media/player/misc/IAndroidIO";
+    sign = "com/github/tvbox/fsp/player/misc/IAndroidIO";
     class_J4AC_tv_danmaku_ijk_media_player_misc_IAndroidIO.id = J4A_FindClass__asGlobalRef__catchAll(env, sign);
     if (class_J4AC_tv_danmaku_ijk_media_player_misc_IAndroidIO.id == NULL)
         goto fail;

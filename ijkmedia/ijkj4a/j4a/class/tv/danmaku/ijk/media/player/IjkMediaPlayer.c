@@ -335,7 +335,7 @@ int J4A_loadClass__J4AC_tv_danmaku_ijk_media_player_IjkMediaPlayer(JNIEnv *env)
     if (class_J4AC_tv_danmaku_ijk_media_player_IjkMediaPlayer.id != NULL)
         return 0;
 
-    sign = "tv/danmaku/ijk/media/player/IjkMediaPlayer";
+    sign = "com/github/tvbox/fsp/player/IjkMediaPlayer";
     class_J4AC_tv_danmaku_ijk_media_player_IjkMediaPlayer.id = J4A_FindClass__asGlobalRef__catchAll(env, sign);
     if (class_J4AC_tv_danmaku_ijk_media_player_IjkMediaPlayer.id == NULL)
         goto fail;

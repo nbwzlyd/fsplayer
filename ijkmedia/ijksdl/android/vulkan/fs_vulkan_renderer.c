@@ -38,6 +38,7 @@
 #include "libavutil/pixfmt.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/imgutils.h"
+#include "libavutil/time.h"
 #include "libavcodec/mediacodec.h"
 #include "libswscale/swscale.h"
 
@@ -92,6 +93,14 @@ struct FSVulkanRenderer {
     VkQueue graphics_queue;
     VkQueue present_queue;
     uint32_t queue_family;
+
+    /* 管线缓存：swapchain/pass 重建时复用已编译的管线，并共享给字幕 GPU 层 */
+    VkPipelineCache pipeline_cache;
+    /*
+     * 保护 surface/swapchain 相关状态；display_sub_overlay 会在持有期间
+     * 重入 sync/present 路径，所以必须是递归锁。
+     */
+    pthread_mutex_t surface_mutex;
 
     VkSurfaceKHR surface;
     VkSwapchainKHR swapchain;
@@ -483,6 +492,16 @@ static VkResult create_device(FSVulkanRenderer *r)
               r->instance_11, has_ahb, (unsigned) pd_props.apiVersion);
     else
         ALOGI("FSVulkanRenderer: MediaCodec zero-copy path available\n");
+
+    /* 管线缓存：拿不到也不致命，只是每次重建 pass 都要重编管线 */
+    VkPipelineCacheCreateInfo pci = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+    };
+    r->pipeline_cache = VK_NULL_HANDLE;
+    if (vkCreatePipelineCache(r->device, &pci, NULL, &r->pipeline_cache) != VK_SUCCESS) {
+        r->pipeline_cache = VK_NULL_HANDLE;
+        ALOGW("FSVulkanRenderer: pipeline cache unavailable, pipelines will recompile\n");
+    }
 
     return VK_SUCCESS;
 }
@@ -1107,6 +1126,7 @@ const FSVulkanContext *fs_vulkan_renderer_context(FSVulkanRenderer *r)
     r->ctx.queue_family     = r->queue_family;
     r->ctx.command_pool     = r->command_pool;
     r->ctx.swapchain_format = r->swapchain_format;
+    r->ctx.pipeline_cache   = r->pipeline_cache;
     return &r->ctx;
 }
 
@@ -1362,6 +1382,8 @@ FSVulkanRenderer *fs_vulkan_renderer_create(void)
     if (!r)
         return NULL;
 
+    int64_t create_start = av_gettime_relative();
+
     if (create_instance(r) != VK_SUCCESS)
         goto fail;
     if (create_device(r) != VK_SUCCESS)
@@ -1389,6 +1411,11 @@ FSVulkanRenderer *fs_vulkan_renderer_create(void)
 
     r->snapshot_type = -1;
     pthread_mutex_init(&r->bg_mutex, NULL);
+    pthread_mutexattr_t mutex_attr;
+    pthread_mutexattr_init(&mutex_attr);
+    pthread_mutexattr_settype(&mutex_attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&r->surface_mutex, &mutex_attr);
+    pthread_mutexattr_destroy(&mutex_attr);
     r->bg_iterations = 3;      /* 和 iOS 的默认值一致 */
     r->bg_sigma = 30.0f;
     r->color_brightness = 1.0f;
@@ -1414,6 +1441,9 @@ FSVulkanRenderer *fs_vulkan_renderer_create(void)
     r->video_uvmat[2] = 0.0f; r->video_uvmat[3] = 1.0f;
     r->video_posmat[0] = 1.0f; r->video_posmat[1] = 0.0f;
     r->video_posmat[2] = 0.0f; r->video_posmat[3] = 1.0f;
+
+    ALOGI("FSVulkanRenderer: ready in %dms (instance/device/descriptor/cmd)",
+          (int)((av_gettime_relative() - create_start) / 1000));
     return r;
 
 fail:
@@ -3275,11 +3305,23 @@ int fs_vulkan_renderer_display(FSVulkanRenderer *r, const AVFrame *frame,
  */
 int fs_vulkan_renderer_display_sub_overlay(FSVulkanRenderer *r)
 {
-    if (!r || !r->surface_ready || !r->sub_overlay)
+    if (!r)
         return -1;
 
-    if (fs_vulkan_renderer_sync_surface(r) != 0 || !r->surface_ready)
+    /* sync 期间不能和 set_surface 抢 surface/swapchain，递归锁允许重入 */
+    pthread_mutex_lock(&r->surface_mutex);
+
+    if (!r->surface_ready || !r->sub_overlay) {
+        pthread_mutex_unlock(&r->surface_mutex);
         return -1;
+    }
+
+    if (fs_vulkan_renderer_sync_surface(r) != 0 || !r->surface_ready) {
+        pthread_mutex_unlock(&r->surface_mutex);
+        return -1;
+    }
+
+    pthread_mutex_unlock(&r->surface_mutex);
 
     return draw_and_present(r, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE);
 }
@@ -3307,6 +3349,7 @@ void fs_vulkan_renderer_destroy(FSVulkanRenderer *r)
         if (r->bg_sampler)         vkDestroySampler(r->device, r->bg_sampler, NULL);
         if (r->bg_pass)            vkDestroyRenderPass(r->device, r->bg_pass, NULL);
         pthread_mutex_destroy(&r->bg_mutex);
+        pthread_mutex_destroy(&r->surface_mutex);
         free(r->bg_pending_pixels);
         r->bg_pending_pixels = NULL;
         if (r->snap_pass) { vkDestroyRenderPass(r->device, r->snap_pass, NULL); r->snap_pass = VK_NULL_HANDLE; }
@@ -3354,6 +3397,7 @@ void fs_vulkan_renderer_destroy(FSVulkanRenderer *r)
         if (r->swapchain_images) free(r->swapchain_images);
         if (r->swapchain) vkDestroySwapchainKHR(r->device, r->swapchain, NULL);
         if (r->surface) vkDestroySurfaceKHR(r->instance, r->surface, NULL);
+        if (r->pipeline_cache) vkDestroyPipelineCache(r->device, r->pipeline_cache, NULL);
 
         vkDestroyDevice(r->device, NULL);
     }

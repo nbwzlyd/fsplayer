@@ -43,6 +43,8 @@ typedef struct FSVulkanContext {
     uint32_t         queue_family;
     VkCommandPool    command_pool;
     VkFormat         swapchain_format;
+    /* 与渲染器共享的管线缓存：字幕层的管线也能命中同一份缓存 */
+    VkPipelineCache  pipeline_cache;
 } FSVulkanContext;
 
 /*
