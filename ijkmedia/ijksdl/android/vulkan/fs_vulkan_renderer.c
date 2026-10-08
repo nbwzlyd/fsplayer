@@ -647,6 +647,15 @@ static VkResult create_surface_swapchain(FSVulkanRenderer *r)
         .presentMode = VK_PRESENT_MODE_FIFO_KHR,
         .clipped = VK_TRUE,
     };
+
+    ALOGI("FSVulkanRenderer: swapchain %ux%u window=%dx%d currentTransform=%d "
+          "preTransform=%d contentRot=%d supportedTransforms=0x%x\n",
+          extent.width, extent.height,
+          r->window ? ANativeWindow_getWidth(r->window) : 0,
+          r->window ? ANativeWindow_getHeight(r->window) : 0,
+          (int)caps.currentTransform, (int)swci.preTransform, r->content_rot,
+          (unsigned)caps.supportedTransforms);
+
     if (vkCreateSwapchainKHR(r->device, &swci, NULL, &r->swapchain) != VK_SUCCESS)
         return VK_ERROR_INITIALIZATION_FAILED;
 
@@ -1476,36 +1485,100 @@ fail:
     return NULL;
 }
 
+/* surface/swapchain 的拆建实现在文件后部（display 的 sync 路径也用），这里先声明 */
+static void destroy_surface_swapchain(FSVulkanRenderer *r);
+static void destroy_mc_resources(FSVulkanRenderer *r);
+
 int fs_vulkan_renderer_set_surface(FSVulkanRenderer *r, ANativeWindow *window)
 {
     if (!r)
         return -1;
 
+    /* 快速路径：surface 没变且已经就绪，不用进锁 */
     if (r->window == window && r->surface_ready)
         return 0;
+
+    /*
+     * surface/swapchain 的拆建会和 display_sub_overlay 的递归回调、渲染线程的 sync
+     * 路径并发，所以整段都放在递归锁里做。
+     */
+    pthread_mutex_lock(&r->surface_mutex);
+
+    /* 抢锁期间可能已经被别的线程建好了 */
+    if (r->window == window && r->surface_ready) {
+        pthread_mutex_unlock(&r->surface_mutex);
+        return 0;
+    }
+
+    /* 重建前必须 GPU 排空，否则会销毁仍被在飞帧引用的对象 */
+    if (r->device)
+        vkDeviceWaitIdle(r->device);
+
+    destroy_surface_swapchain(r);
+
+    /* 重建前的像素格式：重建后如果没变，render pass / pipeline 可以留着复用 */
+    VkFormat old_format = r->swapchain_format;
 
     r->window = window;
     if (!window) {
         r->surface_ready = 0;
+        pthread_mutex_unlock(&r->surface_mutex);
         return 0;
     }
 
-    if (create_surface_swapchain(r) != VK_SUCCESS)
-        return -1;
-    if (create_render_pass(r) != VK_SUCCESS)
-        return -1;
-    if (create_pipeline(r) != VK_SUCCESS)
-        return -1;
-    if (create_framebuffers(r) != VK_SUCCESS)
-        return -1;
+    if (create_surface_swapchain(r) != VK_SUCCESS) {
+        ALOGE("FSVulkanRenderer: surface/swapchain create failed\n");
+        goto fail;
+    }
 
-    /* 字幕管线依赖 swapchain 尺寸（viewpoint 固定），失败只降级为无字幕 */
-    if (create_sub_resources(r) != 0)
-        ALOGW("FSVulkanRenderer: subtitle disabled (pipeline create failed)\n");
+    /*
+     * render pass / pipeline 只依赖 swapchain 的 format（尺寸无关：viewport/scissor
+     * 是动态状态），所以 format 没变只重建 framebuffer，变了才连带重建 pass/pipelines。
+     */
+    const char *state;
+    if (r->render_pass && r->swapchain_format == old_format) {
+        state = "reused";
+    } else {
+        if (r->swapchain_format != old_format)
+            ALOGW("FSVulkanRenderer: surface format changed 0x%x -> 0x%x, rebuilding pass/pipelines\n",
+                  (unsigned)old_format, (unsigned)r->swapchain_format);
+
+        /* 管线和 render pass 是被依赖方，先拆掉依赖它们的字幕 / 硬解管线 */
+        destroy_sub_resources(r);
+        destroy_mc_resources(r);
+        if (r->pipeline)        { vkDestroyPipeline(r->device, r->pipeline, NULL);              r->pipeline = VK_NULL_HANDLE; }
+        if (r->pipeline_layout) { vkDestroyPipelineLayout(r->device, r->pipeline_layout, NULL); r->pipeline_layout = VK_NULL_HANDLE; }
+        if (r->render_pass)     { vkDestroyRenderPass(r->device, r->render_pass, NULL);         r->render_pass = VK_NULL_HANDLE; }
+
+        if (create_render_pass(r) != VK_SUCCESS) {
+            ALOGE("FSVulkanRenderer: pass/pipeline create failed\n");
+            goto fail;
+        }
+        if (create_pipeline(r) != VK_SUCCESS) {
+            ALOGE("FSVulkanRenderer: pass/pipeline create failed\n");
+            goto fail;
+        }
+        /* 字幕管线依赖 swapchain 尺寸（viewpoint 固定），失败只降级为无字幕 */
+        if (create_sub_resources(r) != 0)
+            ALOGW("FSVulkanRenderer: subtitle disabled (pipeline create failed)\n");
+        state = "rebuilt";
+    }
+
+    if (create_framebuffers(r) != VK_SUCCESS) {
+        ALOGE("FSVulkanRenderer: framebuffer create failed\n");
+        goto fail;
+    }
 
     r->surface_ready = 1;
-    ALOGI("FSVulkanRenderer: surface ready, %ux%u\n", r->swapchain_extent.width, r->swapchain_extent.height);
+    ALOGI("FSVulkanRenderer: surface ready, %ux%u (pass/pipeline %s)\n",
+          r->swapchain_extent.width, r->swapchain_extent.height, state);
+    pthread_mutex_unlock(&r->surface_mutex);
     return 0;
+
+fail:
+    r->surface_ready = 0;
+    pthread_mutex_unlock(&r->surface_mutex);
+    return -1;
 }
 
 /* 非 YUV420P 的帧先转成 YUV420P */
@@ -3028,8 +3101,6 @@ static int rebuild_swapchain(FSVulkanRenderer *r)
     /* 确保没有在飞的帧：重建前必须 GPU 排空，否则会销毁仍被引用的对象 */
     vkDeviceWaitIdle(r->device);
 
-    VkFormat old_format = r->swapchain_format;
-
     destroy_surface_swapchain(r);
 
     if (create_surface_swapchain(r) != VK_SUCCESS) {
@@ -3037,24 +3108,11 @@ static int rebuild_swapchain(FSVulkanRenderer *r)
         return -1;
     }
 
-    if (r->swapchain_format != old_format) {
-        ALOGW("FSVulkanRenderer: surface format changed 0x%x -> 0x%x, rebuilding pass/pipelines\n",
-              (unsigned)old_format, (unsigned)r->swapchain_format);
-        destroy_sub_resources(r);
-        destroy_mc_resources(r);
-        if (r->pipeline)        { vkDestroyPipeline(r->device, r->pipeline, NULL);              r->pipeline = VK_NULL_HANDLE; }
-        if (r->pipeline_layout) { vkDestroyPipelineLayout(r->device, r->pipeline_layout, NULL); r->pipeline_layout = VK_NULL_HANDLE; }
-        if (r->render_pass)     { vkDestroyRenderPass(r->device, r->render_pass, NULL);         r->render_pass = VK_NULL_HANDLE; }
-        if (create_render_pass(r) != VK_SUCCESS ||
-            create_pipeline(r) != VK_SUCCESS) {
-            ALOGE("FSVulkanRenderer: pass/pipeline rebuild failed\n");
-            r->surface_ready = 0;
-            return -1;
-        }
-        if (create_sub_resources(r) != 0)
-            ALOGW("FSVulkanRenderer: subtitle disabled after format change\n");
-    }
-
+    /*
+     * 每帧路径只重建 framebuffer：render pass / pipeline 只依赖 swapchain 的
+     * format（尺寸无关，viewport/scissor 是动态状态），format 真变了由
+     * set_surface 连带重建 pass/pipelines，这里不碰它们。
+     */
     if (create_framebuffers(r) != VK_SUCCESS) {
         ALOGE("FSVulkanRenderer: framebuffer recreate failed\n");
         return -1;
