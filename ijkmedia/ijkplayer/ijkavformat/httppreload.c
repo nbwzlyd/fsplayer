@@ -209,7 +209,23 @@ static int open(URLContext *h, const char *uri, int flags, AVDictionary **option
     // break recursion
     av_dict_set(options, "selected_http", NULL, 0);
 
-    int ret = ffurl_open_whitelist(&c->inner, uri, flags, &h->interrupt_callback, options, h->protocol_whitelist, h->protocol_blacklist, h);
+    /*
+     * 嵌套打开必须放行 tcp：上层（avformat）传下来的白名单可能只是按 URL scheme
+     * 派生的 'https,http,tls'（原本就可能是 NULL，由 ffurl 现场派生），少了 tcp
+     * 时 ijkhttp2 内部那层 tcp 连接会被 "Protocol 'tcp' not on whitelist" 拦掉，
+     * 表现为 avformat_open_input 直接返回 EINVAL(-22)、起播失败。
+     * 这里把 tcp 补进去再往下传；父级白名单为空时给一份明确的默认值。
+     */
+    char *nested_whitelist = NULL;
+    if (!h->protocol_whitelist)
+        nested_whitelist = av_strdup("http,https,tls,tcp,crypto");
+    else if (!av_match_list("tcp", h->protocol_whitelist, ','))
+        nested_whitelist = av_asprintf("%s,tcp", h->protocol_whitelist);
+
+    int ret = ffurl_open_whitelist(&c->inner, uri, flags, &h->interrupt_callback, options,
+                                   nested_whitelist ? nested_whitelist : h->protocol_whitelist,
+                                   h->protocol_blacklist, h);
+    av_freep(&nested_whitelist);
     if (ret < 0) return ret;
 
     c->total_size = ffurl_size(c->inner);
