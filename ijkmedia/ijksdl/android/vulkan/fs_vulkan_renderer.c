@@ -3308,22 +3308,17 @@ int fs_vulkan_renderer_display_sub_overlay(FSVulkanRenderer *r)
     if (!r)
         return -1;
 
-    /* sync 期间不能和 set_surface 抢 surface/swapchain，递归锁允许重入 */
+    /* 整个 sync + present 过程都要挡住 set_surface；递归锁允许重入 */
     pthread_mutex_lock(&r->surface_mutex);
 
-    if (!r->surface_ready || !r->sub_overlay) {
-        pthread_mutex_unlock(&r->surface_mutex);
-        return -1;
-    }
-
-    if (fs_vulkan_renderer_sync_surface(r) != 0 || !r->surface_ready) {
-        pthread_mutex_unlock(&r->surface_mutex);
-        return -1;
+    int ret = -1;
+    if (r->surface_ready && r->sub_overlay
+        && fs_vulkan_renderer_sync_surface(r) == 0 && r->surface_ready) {
+        ret = draw_and_present(r, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE);
     }
 
     pthread_mutex_unlock(&r->surface_mutex);
-
-    return draw_and_present(r, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE);
+    return ret;
 }
 
 void fs_vulkan_renderer_destroy(FSVulkanRenderer *r)
