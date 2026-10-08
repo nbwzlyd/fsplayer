@@ -617,6 +617,21 @@ static VkResult create_surface_swapchain(FSVulkanRenderer *r)
         image_count = caps.maxImageCount;
     r->image_count = image_count;
 
+    /*
+     * 显示内容旋转（contentRot）：swapchain 是按 preTransform = currentTransform
+     * 创建的，等于告诉合成器"我提交的画面需要你按这个 transform 转一下"，
+     * 所以渲染侧必须预先反向转回来，否则放出来画面就是躺倒的
+     * （字幕和视频共用同一套 NDC 变换，会跟着一起转，见 compute_video_transform）。
+     */
+    switch (caps.currentTransform) {
+    case VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR:  r->content_rot = 270; break;
+    case VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR: r->content_rot = 180; break;
+    case VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR: r->content_rot = 90;  break;
+    default:                                      r->content_rot = 0;   break;
+    }
+    r->surface_current_transform = (int)caps.currentTransform;
+    r->surface_pre_transform     = (int)caps.currentTransform;
+
     VkSwapchainCreateInfoKHR swci = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
         .surface = r->surface,
