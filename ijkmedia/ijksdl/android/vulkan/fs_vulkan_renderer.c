@@ -197,6 +197,11 @@ struct FSVulkanRenderer {
 
     /* 上一帧的画面：快照要用同样的管线和参数重画一次 */
     int              video_w, video_h;      /* 解码帧原始尺寸 */
+    /* fsp: 「播放信息」面板诊断（供 ff_ffplay 属性 20400~ 读取） */
+    int              diag_pixfmt;           /* 最近一帧的 AVPixelFormat */
+    int              diag_10bit;            /* 1=10bit */
+    int              diag_path;             /* 1=mc 零拷贝, 2=cpu-yuv, 0=未知 */
+    int              diag_gate;             /* 硬解门槛：1/2/3/4=不通过原因, 99=全通过 */
     int              last_rot;              /* 归一化到 0/90/180/270 */
     VkPipeline       last_pipeline;
     VkPipelineLayout last_layout;
@@ -478,6 +483,12 @@ static VkResult create_device(FSVulkanRenderer *r)
 
         r->mc_supported = r->mcGetAHBProps && r->mcCreateYcbcr && r->mcDestroyYcbcr;
     }
+    /* fsp: 硬解门槛码（供面板显示） */
+    if (r->mc_supported)                 r->diag_gate = 99;   /* 全通过 */
+    else if (!r->instance_11)            r->diag_gate = 1;    /* 非 Vulkan 1.1 */
+    else if (!has_ahb)                   r->diag_gate = 2;    /* 无 AHB 扩展 */
+    else if (pd_props.apiVersion < VK_API_VERSION_1_1) r->diag_gate = 3;  /* 设备 API<1.1 */
+    else                                 r->diag_gate = 4;    /* 缺 AHB props / Ycbcr 函数 */
     if (!r->mc_supported)
         ALOGW("FSVulkanRenderer: MediaCodec zero-copy path unavailable "
               "(vulkan11=%d ahb=%d api=0x%x)\n",
@@ -599,7 +610,7 @@ static VkResult create_surface_swapchain(FSVulkanRenderer *r)
         .imageArrayLayers = 1,
         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .preTransform = caps.currentTransform,
+        .preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,   /* fsp: 旋转交给合成器，避免自身重采样导致发虚 */
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
         .presentMode = VK_PRESENT_MODE_FIFO_KHR,
         .clipped = VK_TRUE,
@@ -1489,6 +1500,7 @@ static int ensure_yuv420p(FSVulkanRenderer *r, const AVFrame *frame,
 
     if (frame->format == AV_PIX_FMT_YUV420P || frame->format == AV_PIX_FMT_YUV420P10LE) {
         *is10bit = (frame->format == AV_PIX_FMT_YUV420P10LE) ? 1 : 0;
+        r->diag_10bit = *is10bit;
         *y = frame->data[0]; *y_stride = frame->linesize[0];
         *u = frame->data[1]; *u_stride = frame->linesize[1];
         *v = frame->data[2]; *v_stride = frame->linesize[2];
@@ -3257,7 +3269,12 @@ int fs_vulkan_renderer_display(FSVulkanRenderer *r, const AVFrame *frame,
                             rotate_degrees, sar_num, sar_den);
 
     /* MediaCodec 硬解：零拷贝外部显存通路 */
+    r->diag_pixfmt = frame->format;
+    r->diag_path   = (frame->format == AV_PIX_FMT_MEDIACODEC) ? 1 : 2;
+    if (frame->format == AV_PIX_FMT_YUV420P10LE || frame->format == AV_PIX_FMT_P010LE)
+        r->diag_10bit = 1;
     if (frame->format == AV_PIX_FMT_MEDIACODEC)
+
         return display_mc_frame(r, frame);
 
     /*
@@ -3411,4 +3428,18 @@ jobject fs_vulkan_renderer_get_mediacodec_surface(JNIEnv *env, FSVulkanRenderer 
         return NULL;
 
     return SDL_AndroidImageReader_getSurface(env, r->mc_reader);
+}
+
+/* fsp: 面板诊断读取（what: 0=pixfmt, 1=10bit, 2=path） */
+int32_t fs_vulkan_renderer_diag(FSVulkanRenderer *r, int what)
+{
+    if (!r)
+        return -1;
+    switch (what) {
+    case 0: return r->diag_pixfmt;
+    case 1: return r->diag_10bit;
+    case 2: return r->diag_path;
+    case 3: return r->diag_gate;
+    default: return -1;
+    }
 }

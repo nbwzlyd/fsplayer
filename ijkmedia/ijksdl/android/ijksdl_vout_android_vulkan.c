@@ -482,3 +482,14 @@ SDL_GPU *SDL_VoutAndroid_GetGPU(SDL_Vout *vout)
     /* 借用：所有权在 ffplayer，vout 只负责销毁前 detach（见 vout_free_l） */
     return vout->opaque->gpu;
 }
+/* fsp: 面板诊断透传（what 见 fs_vulkan_renderer_diag） */
+/* fsp: 本文件未包含 vulkan 渲染器头，直接声明原型 */
+extern int32_t fs_vulkan_renderer_diag(FSVulkanRenderer *r, int what);
+
+int SDL_VoutAndroid_GetFSDiag(SDL_Vout *vout, int what)
+{
+    SDL_Vout_Opaque *opaque = vout->opaque;
+    if (!opaque || !opaque->renderer)
+        return -1;
+    return fs_vulkan_renderer_diag(opaque->renderer, what);
+}

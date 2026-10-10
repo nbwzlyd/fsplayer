@@ -49,6 +49,7 @@ void SDL_VoutAndroid_SetAndroidSurface(JNIEnv *env, SDL_Vout *vout, jobject andr
  * 不可用时上层应保持软解。
  */
 int SDL_VoutAndroid_IsMediaCodecSupported(SDL_Vout *vout);
+int SDL_VoutAndroid_GetFSDiag(SDL_Vout *vout, int what);
 
 /*
  * 返回 AImageReader 的输出 Surface，供 MediaCodec 作为解码输出目标。

@@ -4476,6 +4476,10 @@ static int read_thread(void *arg)
         
         pkt->flags = 0;
         ret = av_read_frame(ic, pkt);
+        /* fsp: 普通读取路径喂 tcp 速度采样器（ijkio 预读关闭时 inject_opaque 事件不会来） */
+        if (ret >= 0 && pkt->size > 0) {
+            SDL_SpeedSampler2Add(&ffp->stat.tcp_read_sampler, pkt->size);
+        }
         if (ret < 0) {
             int pb_eof = 0;
             int pb_error = 0;
@@ -6048,6 +6052,14 @@ int64_t ffp_get_property_int64(FFPlayer *ffp, int id, int64_t default_value)
             return ffp->stat.sar_den;
         case FFP_PROP_INT64_BIT_RATE:
             return ffp ? ffp->stat.bit_rate : default_value;
+        case FFP_PROP_INT64_FS_DIAG_PIXFMT:
+            return ffp ? SDL_VoutAndroid_GetFSDiag(ffp->vout, 0) : default_value;
+        case FFP_PROP_INT64_FS_DIAG_10BIT:
+            return ffp ? SDL_VoutAndroid_GetFSDiag(ffp->vout, 1) : default_value;
+        case FFP_PROP_INT64_FS_DIAG_PATH:
+            return ffp ? SDL_VoutAndroid_GetFSDiag(ffp->vout, 2) : default_value;
+        case FFP_PROP_INT64_FS_DIAG_GATE:
+            return ffp ? SDL_VoutAndroid_GetFSDiag(ffp->vout, 3) : default_value;
         case FFP_PROP_INT64_TCP_SPEED:
             return ffp ? SDL_SpeedSampler2GetSpeed(&ffp->stat.tcp_read_sampler) : default_value;
         case FFP_PROP_INT64_ASYNC_STATISTIC_BUF_BACKWARDS:

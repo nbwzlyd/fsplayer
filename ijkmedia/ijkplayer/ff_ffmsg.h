@@ -100,6 +100,11 @@
 #define FFP_PROP_INT64_BIT_RATE                         20100
 
 #define FFP_PROP_INT64_TCP_SPEED                        20200
+/* fsp: 「播放信息」面板诊断属性 */
+#define FFP_PROP_INT64_FS_DIAG_PIXFMT                   20400
+#define FFP_PROP_INT64_FS_DIAG_10BIT                    20401
+#define FFP_PROP_INT64_FS_DIAG_PATH                     20402
+#define FFP_PROP_INT64_FS_DIAG_GATE                     20403
 
 #define FFP_PROP_INT64_ASYNC_STATISTIC_BUF_BACKWARDS    20201
 #define FFP_PROP_INT64_ASYNC_STATISTIC_BUF_FORWARDS     20202

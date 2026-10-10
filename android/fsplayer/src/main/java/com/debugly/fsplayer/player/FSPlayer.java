@@ -1051,6 +1051,16 @@ public final class FSPlayer extends AbstractMediaPlayer {
         return _getPropertyLong(FFP_PROP_INT64_BIT_RATE, 0);
     }
 
+    /* ===== fsp: 「播放信息」面板诊断（属性 20400~20402，见 ff_ffmsg.h） ===== */
+    /** 最近一帧像素格式（AVPixelFormat；164=MEDIACODEC，0=YUV420P） */
+    public int getFSDiagPixFmt() { return (int) _getPropertyLong(20400, -1); }
+    /** 是否 10bit */
+    public int getFSDiag10Bit() { return (int) _getPropertyLong(20401, 0); }
+    /** 硬解门槛：1=非Vulkan1.1 2=无AHB扩展 3=设备API<1.1 4=缺AHBprops/Ycbcr 99=全通过 */
+    public int getFSDiagGate() { return (int) _getPropertyLong(20403, -1); }
+    /** 解码通路：1=mc 零拷贝，2=cpu-yuv */
+    public int getFSDiagPath() { return (int) _getPropertyLong(20402, 0); }
+
     public long getTcpSpeed() {
         return _getPropertyLong(FFP_PROP_INT64_TCP_SPEED, 0);
     }
