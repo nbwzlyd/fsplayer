@@ -22,6 +22,9 @@
  */
 
 #include "fs_vulkan_renderer.h"
+#include <dlfcn.h>
+#include <android/data_space.h>
+
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -579,6 +582,8 @@ static VkResult create_surface_swapchain(FSVulkanRenderer *r)
     vkGetPhysicalDeviceSurfaceFormatsKHR(r->physical_device, r->surface, &fmt_count, formats);
 
     VkSurfaceFormatKHR chosen = formats[0];
+    r->display_hdr_support = 0;   /* fsp: 每轮重新判定，避免沿用上一个 surface 的结论 */
+    /* 8bit 兜底候选 */
     for (uint32_t i = 0; i < fmt_count; i++) {
         if (formats[i].format == VK_FORMAT_R8G8B8A8_UNORM ||
             formats[i].format == VK_FORMAT_B8G8R8A8_UNORM) {
@@ -586,7 +591,21 @@ static VkResult create_surface_swapchain(FSVulkanRenderer *r)
             break;
         }
     }
+    /*
+     * fsp: 优先挑 10bit 交换链（A2B10G10R10_UNORM_PACK32，通道序与 R8G8B8A8 一致），
+     * 这样 display_hdr_support=1，HDR10/HLG 内容可以直出，不再在着色器里 hdr2sdr 压成 SDR。
+     * 若表面不支持 10bit，则退回 8bit 并保持原来的 hdr2sdr 行为。
+     */
+    for (uint32_t i = 0; i < fmt_count; i++) {
+        if (formats[i].format == VK_FORMAT_A2B10G10R10_UNORM_PACK32) {
+            chosen = formats[i];
+            r->display_hdr_support = 1;
+            break;
+        }
+    }
     r->swapchain_format = chosen.format;
+    ALOGI("FSVulkanRenderer: swapchain format=0x%x display_hdr_support=%d colorSpace=%d\n",
+          (unsigned) r->swapchain_format, r->display_hdr_support, (int) chosen.colorSpace);
 
     VkExtent2D extent = caps.currentExtent;
     if (extent.width == UINT32_MAX) {
@@ -2430,12 +2449,45 @@ void fs_vulkan_renderer_set_color_adjust(FSVulkanRenderer *r,
  * 只有「内容 HDR && 允许直显 && 屏能直出」时才不做色调映射；当前 8bit UNORM 交换链
  * 永远走色调映射（相当于 iOS 上屏不支持 EDR 的情形）。
  */
+/* fsp: 把"HDR/SDR"告诉系统窗口（API28+ 才有的 ANativeWindow_setBuffersDataSpace，用 dlopen 规避 API24 链接门槛）。
+   dataspace 常量取自 <android/data_space.h>：BT2020_PQ / BT2020_HLG / BT709。 */
+#include <dlfcn.h>
+#include <android/data_space.h>
+typedef int (*FSVkSetBuffersDataSpace)(ANativeWindow *w, int32_t space);
+static FSVkSetBuffersDataSpace g_fs_set_dataspace = NULL;
+static void apply_window_dataspace(FSVulkanRenderer *r, int hdr, int hlg)
+{
+    if (!r || !r->window)
+        return;
+    if (!g_fs_set_dataspace) {
+        void *h = dlopen("libandroid.so", RTLD_LAZY);
+        if (h)
+            g_fs_set_dataspace = (FSVkSetBuffersDataSpace) dlsym(h, "ANativeWindow_setBuffersDataSpace");
+    }
+    if (!g_fs_set_dataspace)
+        return;
+    int32_t space = !hdr ? ADATASPACE_BT709 : ADATASPACE_BT2020_PQ;   /* fsp: HLG 也在着色器里转成 PQ 输出 */
+    (void) hlg;
+    g_fs_set_dataspace(r->window, space);
+}
+
 void fs_vulkan_renderer_set_allow_hdr_display(FSVulkanRenderer *r, int allow)
 {
     if (!r)
         return;
     r->allow_hdr_display = allow ? 1 : 0;
     r->hdr_display = (r->hdr_content && r->allow_hdr_display && r->display_hdr_support) ? 1 : 0;
+    apply_window_dataspace(r, r->hdr_content, r->hdr_transfer == 2);
+    {
+        static int s_last_hdr_state = -1;
+        int st = (r->hdr_content << 2) | (r->hdr_display << 1) | (r->hdr_transfer == 2 ? 1 : 0);
+        if (st != s_last_hdr_state) {
+            s_last_hdr_state = st;
+            ALOGI("FSVulkanRenderer: hdr content=%d display=%d allow=%d transfer=%d fullrange=%d tex10bit=%d support=%d\n",
+                  r->hdr_content, r->hdr_display, r->allow_hdr_display, r->hdr_transfer,
+                  r->hdr_full_range, r->tex10bit, r->display_hdr_support);
+        }
+    }
 }
 
 /* 当前帧是不是 HDR 内容（BT.2020），对齐 iOS 的 isHDRContent */
@@ -3293,6 +3345,17 @@ int fs_vulkan_renderer_display(FSVulkanRenderer *r, const AVFrame *frame,
         r->hdr_transfer = 0;                 /* 线性 */
     }
     r->hdr_display = (r->hdr_content && r->allow_hdr_display && r->display_hdr_support) ? 1 : 0;
+    apply_window_dataspace(r, r->hdr_content, r->hdr_transfer == 2);
+    {
+        static int s_last_hdr_state = -1;
+        int st = (r->hdr_content << 2) | (r->hdr_display << 1) | (r->hdr_transfer == 2 ? 1 : 0);
+        if (st != s_last_hdr_state) {
+            s_last_hdr_state = st;
+            ALOGI("FSVulkanRenderer: hdr content=%d display=%d allow=%d transfer=%d fullrange=%d tex10bit=%d support=%d\n",
+                  r->hdr_content, r->hdr_display, r->allow_hdr_display, r->hdr_transfer,
+                  r->hdr_full_range, r->tex10bit, r->display_hdr_support);
+        }
+    }
 
     const uint8_t *y, *u, *v;
     int y_stride, u_stride, v_stride, w, h, is10bit = 0;

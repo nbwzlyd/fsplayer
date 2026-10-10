@@ -96,6 +96,23 @@ vec3 tonemap(vec3 x)
 
 // 直显模式（HDR 屏）：只做 EOTF + 色域转换，不压缩动态范围，
 // 归一化到 203 nits 为 1.0，>1.0 的部分交给 EDR/HDR 层。
+
+// fsp: ST.2084 (PQ) 逆 EOTF：输入 = 亮度/10000 归一，输出 PQ 码值
+float st_2084_inverse_eotf(float x)
+{
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    float xp = pow(max(x, 0.0), m1);
+    return pow((c1 + c2 * xp) / (1.0 + c3 * xp), m2);
+}
+vec3 st_2084_inverse_eotf_vec(vec3 v)
+{
+    return vec3(st_2084_inverse_eotf(v.r), st_2084_inverse_eotf(v.g), st_2084_inverse_eotf(v.b));
+}
+
 vec3 hdr_direct(vec3 rgb_2020, int tf)
 {
     vec3 linear;
@@ -106,7 +123,10 @@ vec3 hdr_direct(vec3 rgb_2020, int tf)
     } else {
         linear = rec_1886_eotf_vec(rgb_2020);
     }
-    return RGB2020_TO_RGB709 * linear;
+    /* fsp: 直出到 BT2020_PQ 交换链 —— 保留 BT.2020，重新按 PQ 编码（linear 的 1.0 = 203nits） */
+    vec3 nits = linear * 203.0;
+    vec3 pq_in = clamp(nits / 10000.0, 0.0, 1.0);
+    return st_2084_inverse_eotf_vec(pq_in);
 }
 
 // SDR 屏：EOTF -> 色域转到 BT.709 -> 色调映射（peak_luminance = 50，和 iOS 一致）
