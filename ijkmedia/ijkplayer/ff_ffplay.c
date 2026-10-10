@@ -6058,6 +6058,8 @@ int64_t ffp_get_property_int64(FFPlayer *ffp, int id, int64_t default_value)
             return ffp ? SDL_VoutAndroid_GetFSDiag(ffp->vout, 1) : default_value;
         case FFP_PROP_INT64_FS_DIAG_PATH:
             return ffp ? SDL_VoutAndroid_GetFSDiag(ffp->vout, 2) : default_value;
+        case FFP_PROP_INT64_FS_DIAG_COLOR:
+            return ffp ? SDL_VoutAndroid_GetFSDiag(ffp->vout, 4) : default_value;
         case FFP_PROP_INT64_FS_DIAG_GATE:
             return ffp ? SDL_VoutAndroid_GetFSDiag(ffp->vout, 3) : default_value;
         case FFP_PROP_INT64_TCP_SPEED:

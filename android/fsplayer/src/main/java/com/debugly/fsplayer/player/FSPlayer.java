@@ -1058,6 +1058,8 @@ public final class FSPlayer extends AbstractMediaPlayer {
     public int getFSDiag10Bit() { return (int) _getPropertyLong(20401, 0); }
     /** 硬解门槛：1=非Vulkan1.1 2=无AHB扩展 3=设备API<1.1 4=缺AHBprops/Ycbcr 99=全通过 */
     public int getFSDiagGate() { return (int) _getPropertyLong(20403, -1); }
+    /** 色彩信息打包：bit0-1=transfer(0线性/1PQ/2HLG) bit2=BT2020内容 bit3=fullrange bit4=HDR直出中 bit5=屏支持 */
+    public int getFSDiagColor() { return (int) _getPropertyLong(20404, -1); }
     /** 解码通路：1=mc 零拷贝，2=cpu-yuv */
     public int getFSDiagPath() { return (int) _getPropertyLong(20402, 0); }
 

@@ -42,6 +42,7 @@
 #include "libavutil/pixdesc.h"
 #include "libavutil/imgutils.h"
 #include "libavcodec/mediacodec.h"
+#include "libavutil/mastering_display_metadata.h"
 #include "libswscale/swscale.h"
 
 #include "ijksdl/ijksdl_log.h"
@@ -99,6 +100,9 @@ struct FSVulkanRenderer {
 
     VkSurfaceKHR surface;
     VkSwapchainKHR swapchain;
+    /* fsp: HDR 静态元数据上报 */
+    PFN_vkSetHdrMetadataEXT set_hdr_metadata;
+    unsigned long long      hdr_meta_key;
     VkFormat swapchain_format;
     VkExtent2D swapchain_extent;
     uint32_t image_count;
@@ -450,11 +454,14 @@ static VkResult create_device(FSVulkanRenderer *r)
     int mc_ok = r->instance_11 && has_ahb &&
                 (pd_props.apiVersion >= VK_API_VERSION_1_1);
 
-    const char *extensions[2];
+    const char *extensions[3];
     uint32_t ext_count = 0;
+    int has_hdr_md = device_has_extension(r->physical_device, VK_EXT_HDR_METADATA_EXTENSION_NAME);
     extensions[ext_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     if (mc_ok)
         extensions[ext_count++] = VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME;
+    if (has_hdr_md)
+        extensions[ext_count++] = VK_EXT_HDR_METADATA_EXTENSION_NAME;
 
     VkPhysicalDeviceSamplerYcbcrConversionFeatures ycbcr_feat = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES,
@@ -485,6 +492,11 @@ static VkResult create_device(FSVulkanRenderer *r)
             vkGetDeviceProcAddr(r->device, "vkDestroySamplerYcbcrConversion");
 
         r->mc_supported = r->mcGetAHBProps && r->mcCreateYcbcr && r->mcDestroyYcbcr;
+    }
+    if (has_hdr_md) {
+        r->set_hdr_metadata = (PFN_vkSetHdrMetadataEXT)(void *)
+            vkGetDeviceProcAddr(r->device, "vkSetHdrMetadataEXT");
+        ALOGI("FSVulkanRenderer: VK_EXT_hdr_metadata enabled=%d\n", r->set_hdr_metadata != NULL);
     }
     /* fsp: 硬解门槛码（供面板显示） */
     if (r->mc_supported)                 r->diag_gate = 99;   /* 全通过 */
@@ -613,6 +625,7 @@ static VkResult create_surface_swapchain(FSVulkanRenderer *r)
         extent.height = 720;
     }
     r->swapchain_extent = extent;
+    r->hdr_meta_key = ~0ULL;   /* 换交换链后重发 HDR 元数据（元数据是每交换链属性） */
 
     uint32_t image_count = caps.minImageCount + 1;
     if (caps.maxImageCount > 0 && image_count > caps.maxImageCount)
@@ -3306,6 +3319,59 @@ int fs_vulkan_renderer_get_scaling_mode(FSVulkanRenderer *r)
     return r ? r->scaling_mode : FS_SCALING_MODE_ASPECT_FIT;
 }
 
+
+/* fsp: 从帧 side data 取 HDR 静态元数据并上报（仅 HDR 直出时；值变化才调用） */
+static float fs_av_q2f(AVRational q) { return q.den ? (float)q.num / (float)q.den : 0.0f; }
+static void apply_hdr_metadata(FSVulkanRenderer *r, const AVFrame *frame)
+{
+    if (!r || !r->set_hdr_metadata || !r->swapchain || !r->hdr_display)
+        return;
+    AVFrameSideData *sd_md = av_frame_get_side_data(frame, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);
+    AVFrameSideData *sd_cl = av_frame_get_side_data(frame, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL);
+    AVMasteringDisplayMetadata *md = sd_md ? (AVMasteringDisplayMetadata *) sd_md->data : NULL;
+    AVContentLightMetadata *cl = sd_cl ? (AVContentLightMetadata *) sd_cl->data : NULL;
+    if (!md && !cl)
+        return;
+    unsigned long long key = 0;
+    if (md) key = (unsigned long long) md->max_luminance.num * 1000003ULL
+                ^ (unsigned long long) md->max_luminance.den * 1000033ULL
+                ^ (unsigned long long) md->display_primaries[0][0].num * 1000037ULL
+                ^ (unsigned long long) md->white_point[0].num * 1000039ULL;
+    if (cl) key ^= ((unsigned long long) cl->MaxCLL << 20) ^ (unsigned long long) cl->MaxFALL;
+    if (key == r->hdr_meta_key)
+        return;
+    r->hdr_meta_key = key;
+
+    VkHdrMetadataEXT m;
+    memset(&m, 0, sizeof(m));
+    m.sType = VK_STRUCTURE_TYPE_HDR_METADATA_EXT;
+    if (md) {
+        m.displayPrimaryRed.x   = fs_av_q2f(md->display_primaries[0][0]) * 0.00002f;
+        m.displayPrimaryRed.y   = fs_av_q2f(md->display_primaries[0][1]) * 0.00002f;
+        m.displayPrimaryGreen.x = fs_av_q2f(md->display_primaries[1][0]) * 0.00002f;
+        m.displayPrimaryGreen.y = fs_av_q2f(md->display_primaries[1][1]) * 0.00002f;
+        m.displayPrimaryBlue.x  = fs_av_q2f(md->display_primaries[2][0]) * 0.00002f;
+        m.displayPrimaryBlue.y  = fs_av_q2f(md->display_primaries[2][1]) * 0.00002f;
+        m.whitePoint.x          = fs_av_q2f(md->white_point[0]) * 0.00002f;
+        m.whitePoint.y          = fs_av_q2f(md->white_point[1]) * 0.00002f;
+        m.maxLuminance          = fs_av_q2f(md->max_luminance) * 0.0001f;
+        m.minLuminance          = fs_av_q2f(md->min_luminance) * 0.0001f;
+    } else {
+        /* 没有 mastering 信息时给 BT.2020 + D65 默认值，避免全 0 被系统误判 */
+        m.displayPrimaryRed.x = 0.708f;  m.displayPrimaryRed.y = 0.292f;
+        m.displayPrimaryGreen.x = 0.170f; m.displayPrimaryGreen.y = 0.797f;
+        m.displayPrimaryBlue.x = 0.131f; m.displayPrimaryBlue.y = 0.046f;
+        m.whitePoint.x = 0.3127f; m.whitePoint.y = 0.3290f;
+        m.maxLuminance = 1000.0f; m.minLuminance = 0.005f;
+    }
+    if (cl) {
+        m.maxContentLightLevel = (float) cl->MaxCLL;
+        m.maxFrameAverageLightLevel = (float) cl->MaxFALL;
+    }
+    r->set_hdr_metadata(r->device, 1, &r->swapchain, &m);
+    ALOGI("FSVulkanRenderer: hdr metadata applied maxCLL=%d maxFALL=%d maxLum=%.0f\n", cl ? cl->MaxCLL : -1, cl ? cl->MaxFALL : -1, m.maxLuminance);
+}
+
 int fs_vulkan_renderer_display(FSVulkanRenderer *r, const AVFrame *frame,
                                int disp_w, int disp_h,
                                int rotate_degrees, int sar_num, int sar_den)
@@ -3346,6 +3412,7 @@ int fs_vulkan_renderer_display(FSVulkanRenderer *r, const AVFrame *frame,
     }
     r->hdr_display = (r->hdr_content && r->allow_hdr_display && r->display_hdr_support) ? 1 : 0;
     apply_window_dataspace(r, r->hdr_content, r->hdr_transfer == 2);
+    apply_hdr_metadata(r, frame);
     {
         static int s_last_hdr_state = -1;
         int st = (r->hdr_content << 2) | (r->hdr_display << 1) | (r->hdr_transfer == 2 ? 1 : 0);
@@ -3503,6 +3570,12 @@ int32_t fs_vulkan_renderer_diag(FSVulkanRenderer *r, int what)
     case 1: return r->diag_10bit;
     case 2: return r->diag_path;
     case 3: return r->diag_gate;
+    case 4: /* fsp: 打包色彩信息 */
+        return (r->hdr_transfer & 3)
+             | (r->hdr_content ? 4 : 0)
+             | (r->hdr_full_range ? 8 : 0)
+             | (r->hdr_display ? 16 : 0)
+             | (r->display_hdr_support ? 32 : 0);
     default: return -1;
     }
 }
