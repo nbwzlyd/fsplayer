@@ -1035,6 +1035,12 @@ static int parse_playlist(FS_HLSContext *c, const char *url,
                 }
 
                 ff_make_absolute_url(tmp_str, sizeof(tmp_str), url, line);
+                if (!tmp_str[0] && line[0]) {
+                    /* fsp: ff_make_absolute_url 解析不了 ijkio:/androidio: 这类自定义 scheme 的绝对地址，
+                     * 会返回空串。分片 URL 本身已由 App 侧改写成绝对地址，这里回退用原始行，
+                     * 否则整个清单会被判 AVERROR_INVALIDDATA 而全部打不开。 */
+                    av_strlcpy(tmp_str, line, sizeof(tmp_str));
+                }
                 if (!tmp_str[0]) {
                     ret = AVERROR_INVALIDDATA;
                     if (seg->key)

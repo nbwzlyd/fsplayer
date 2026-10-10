@@ -41,6 +41,18 @@ typedef struct IjkIOAndroidioContext {
     URLContext *inner;
 } IjkIOAndroidioContext;
 
+/*
+ * fsp: setAndroidIOCallback() 注册的默认 AndroidIO。
+ * 背景：HLS 的分片是 hls demuxer 用它自己的 options 打开的（ijkhls.c 只复制 seg_format_options），
+ * 那里没有 androidio-inject-callback → 分片 open 会直接失败。
+ * 这里做兜底，使分片也能回到 Java 侧取流。
+ */
+static jobject s_fsp_default_androidio = NULL;
+
+void ijkio_androidio_set_default(void *androidio) {
+    s_fsp_default_androidio = (jobject) androidio;
+}
+
 static int ijkio_androidio_open(IjkURLContext *h, const char *url, int flags, IjkAVDictionary **options) {
     IjkIOAndroidioContext *c= h->priv_data;
     JNIEnv *env = NULL;
@@ -53,11 +65,13 @@ static int ijkio_androidio_open(IjkURLContext *h, const char *url, int flags, Ij
     av_strstart(url, "androidio:", &url);
 
     IjkAVDictionaryEntry *t = NULL;
-    t = ijk_av_dict_get(*options, "androidio-inject-callback", NULL, FS_AV_DICT_IGNORE_SUFFIX);
+    if (options)
+        t = ijk_av_dict_get(*options, "androidio-inject-callback", NULL, FS_AV_DICT_IGNORE_SUFFIX);
     if (t) {
         ijkio_androidio = (jobject) (intptr_t) strtoll(t->value, &final, 10);
     } else {
-        return -1;
+        /* fsp: 分片 open 不带该选项 → 用 setAndroidIOCallback 注册的默认值 */
+        ijkio_androidio = s_fsp_default_androidio;
     }
 
     if (JNI_OK != SDL_JNI_SetupThreadEnv(&env)) {

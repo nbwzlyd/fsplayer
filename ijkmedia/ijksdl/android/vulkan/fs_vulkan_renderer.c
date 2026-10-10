@@ -496,8 +496,9 @@ static VkResult create_device(FSVulkanRenderer *r)
     if (has_hdr_md) {
         r->set_hdr_metadata = (PFN_vkSetHdrMetadataEXT)(void *)
             vkGetDeviceProcAddr(r->device, "vkSetHdrMetadataEXT");
-        ALOGI("FSVulkanRenderer: VK_EXT_hdr_metadata enabled=%d\n", r->set_hdr_metadata != NULL);
     }
+    ALOGI("FSVulkanRenderer: VK_EXT_hdr_metadata supported=%d fn=%d\n",
+          has_hdr_md, r->set_hdr_metadata != NULL);
     /* fsp: 硬解门槛码（供面板显示） */
     if (r->mc_supported)                 r->diag_gate = 99;   /* 全通过 */
     else if (!r->instance_11)            r->diag_gate = 1;    /* 非 Vulkan 1.1 */

@@ -232,6 +232,11 @@ FSPlayer_setAndroidIOCallback(JNIEnv *env, jobject thiz, jobject callback) {
     JNI_CHECK_GOTO(nativeAndroidIO, env, "java/lang/IllegalStateException", "mpjni: jni_set_ijkio_androidio: NewGlobalRef", LABEL_RETURN);
 
     ijkmp_set_option_int(mp, FFP_OPT_CATEGORY_FORMAT, "androidio-inject-callback", nativeAndroidIO);
+    /* fsp: 同时注册为默认 —— HLS 分片 open 的 options 里没有该键，需要兜底 */
+    {
+        extern void ijkio_androidio_set_default(void *androidio);
+        ijkio_androidio_set_default((void *) (intptr_t) nativeAndroidIO);
+    }
 
 LABEL_RETURN:
     ijkmp_dec_ref_p(&mp);
