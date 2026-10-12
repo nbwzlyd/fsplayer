@@ -1,3 +1,3 @@
 [submodule "FFToolChain"]
 	path = FFToolChain
-	url = https://github.com/debugly/MRFFToolChainBuildShell.git
+	url = https://github.com/nbwzlyd/MRFFToolChainBuildShell.git
