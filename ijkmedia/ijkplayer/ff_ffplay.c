@@ -3602,6 +3602,9 @@ static int stream_component_open(FFPlayer *ffp, int stream_index)
     AVChannelLayout ch_layout = { 0 };
     int ret = 0;
     int stream_lowres = ffp->lowres;
+#if defined(__ANDROID__)
+    int mediacodec_attached = 0;
+#endif
     
     if (stream_index < 0 || stream_index >= ic->nb_streams)
         return -1;
@@ -3717,6 +3720,7 @@ static int stream_component_open(FFPlayer *ffp, int stream_index)
         if (ffp_android_mediacodec_init(ffp, avctx, codec) == 0) {
             ALOGI("try use mediacodec direct output: %s\n", codec->name);
             SDL_VoutAndroid_SetDirectDecodeActive(ffp->vout, 1);
+            mediacodec_attached = 1;
         }
 
         /*
@@ -3728,9 +3732,30 @@ static int stream_component_open(FFPlayer *ffp, int stream_index)
             decoder_extradata_annexb(avctx, st);
     }
 #endif
-    if ((ret = avcodec_open2(avctx, codec, &opts)) < 0) {
-        goto fail;
+    ret = avcodec_open2(avctx, codec, &opts);
+#if defined(__ANDROID__)
+    /*
+     * 硬解兜底：MediaCodec 建不起来（设备不支持该 profile/level、实例被占满、
+     * 分辨率超限等）时不能让整个流失败 —— 退回到本编码对应的软解解码器重开一次，
+     * 播放体验等同「软解」，而不是直接报错。
+     */
+    if (ret < 0 && mediacodec_attached) {
+        ALOGW("android: %s open failed (%d), fallback to software decoder\n",
+              codec->name, ret);
+        av_buffer_unref(&avctx->hw_device_ctx);
+        avctx->get_format = avcodec_default_get_format;
+        avctx->codec = NULL;
+        SDL_VoutAndroid_SetDirectDecodeActive(ffp->vout, 0);
+        mediacodec_attached = 0;
+        codec = avcodec_find_decoder(avctx->codec_id);
+        if (codec) {
+            ALOGI("android: retry with software decoder %s\n", codec->name);
+            ret = avcodec_open2(avctx, codec, &opts);
+        }
     }
+#endif
+    if (ret < 0)
+        goto fail;
     const AVDictionaryEntry *t = NULL;
 #if IS_FFMPEG_6
     while ((t = av_dict_iterate(opts, t)))
