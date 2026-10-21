@@ -43,6 +43,9 @@ typedef struct SDL_Vout_Opaque {
     ANativeWindow *window;
     int            win_w;
     int            win_h;
+    /* 软解路径当前设置过的窗口缓冲几何，避免每帧重复 setBuffersGeometry */
+    int            geom_w;
+    int            geom_h;
 
     int            scaling_mode;
     int            bg_r, bg_g, bg_b;
@@ -404,7 +407,11 @@ static int vout_display_overlay_l(SDL_Vout *vout, const Frame *frame, SDL_Textur
                             || fabsf(opaque->contrast - 1.0f) > 0.001f
                             || fabsf(opaque->saturation - 1.0f) > 0.001f);
 
-    ANativeWindow_setBuffersGeometry(opaque->window, win_w, win_h, WINDOW_FORMAT_RGBA_8888);
+    if (opaque->geom_w != win_w || opaque->geom_h != win_h) {
+        ANativeWindow_setBuffersGeometry(opaque->window, win_w, win_h, WINDOW_FORMAT_RGBA_8888);
+        opaque->geom_w = win_w;
+        opaque->geom_h = win_h;
+    }
 
     ANativeWindow_Buffer buf;
     if (ANativeWindow_lock(opaque->window, &buf, NULL) != 0) {
@@ -582,7 +589,16 @@ void SDL_VoutAndroid_SetAndroidSurface(JNIEnv *env, SDL_Vout *vout, jobject andr
     if (android_surface) {
         opaque->window = ANativeWindow_fromSurface(env, android_surface);
         if (opaque->window) {
-            ANativeWindow_setBuffersGeometry(opaque->window, 0, 0, WINDOW_FORMAT_RGBA_8888);
+            /*
+             * 这里刻意不调 setBuffersGeometry：
+             *  - 硬解直出时缓冲区由 MediaCodec 自己分配，强行把窗口格式改成
+             *    RGBA_8888 会让 10bit/HDR 片源退化成 8bit，个别实现还会直接
+             *    拒绝配置（Surface 格式不匹配）。
+             *  - 软解路径在真正 lock 之前会按视频尺寸设置 RGBA_8888（见
+             *    vout_display_overlay_l），两不冲突。
+             */
+            opaque->geom_w = 0;
+            opaque->geom_h = 0;
             ALOGI("%s: surface set %dx%d", TAG,
                   ANativeWindow_getWidth(opaque->window), ANativeWindow_getHeight(opaque->window));
         } else {
