@@ -46,6 +46,11 @@ void      ffp_reset(FFPlayer *ffp);
 
 void     *ffp_set_inject_opaque(FFPlayer *ffp, void *opaque);
 void     *ffp_set_ijkio_inject_opaque(FFPlayer *ffp, void *opaque);
+
+/* 字幕位图回调：直出方案下由 Android JNI 层注册，把 RGBA 位图交给 Java 绘制 */
+void ffp_set_subtitle_bitmap_callback(FFPlayer *ffp,
+                                      void (*callback)(void *opaque, const uint8_t *rgba, int w, int h, int x, int y),
+                                      void *opaque);
 void      ffp_set_option(FFPlayer *ffp, int opt_category, const char *name, const char *value);
 void      ffp_set_option_int(FFPlayer *ffp, int opt_category, const char *name, int64_t value);
 void      ffp_set_option_intptr(FFPlayer *ffp, int opt_category, const char *name, uintptr_t value);

@@ -26,3 +26,28 @@ void monstartup(const char *libname)
 void moncleanup(void)
 {
 }
+
+/*
+ * 直出方案把 Vulkan 移出编译后，SDL_TextureOverlay / SDL_FBOOverlay 的引用计数
+ * 实现（原本在 vulkan/ijksdl_gpu_vulkan.c）也一起没了。
+ *
+ * 字幕已改为「native 出 RGBA 位图 → Java 层绘制」，不再需要 GPU 纹理，
+ * 因此这里保留空实现让旧代码路径可以链接通过（ff_sub_upload_texture 在
+ * gpu == NULL 时会在使用纹理之前就返回 -1，不会真的走到这些对象上）。
+ */
+SDL_TextureOverlay *SDL_TextureOverlay_Retain(SDL_TextureOverlay *t)
+{
+    return t;
+}
+
+void SDL_TextureOverlay_Release(SDL_TextureOverlay **tp)
+{
+    if (tp)
+        *tp = NULL;
+}
+
+void SDL_FBOOverlayFreeP(SDL_FBOOverlay **poverlay)
+{
+    if (poverlay)
+        *poverlay = NULL;
+}

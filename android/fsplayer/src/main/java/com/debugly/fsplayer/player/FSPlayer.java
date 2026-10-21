@@ -2020,4 +2020,41 @@ public final class FSPlayer extends AbstractMediaPlayer {
     }
 
     private native void _setAudioSamplesObserver(boolean enable);
+    /**
+     * 直出模式（zero-GPU 渲染）的字幕回调。
+     *
+     * native 侧不再把字幕合成进视频帧，而是把 libass / PGS 渲染好的 RGBA 位图
+     * 直接回调上来，由普通 View 画在 SurfaceView 之上 —— 与 media3 的字幕交付方式一致。
+     */
+    public interface OnSubtitleBitmapListener {
+        /**
+         * @param rgba   预乘 alpha 的 RGBA 像素（即 Bitmap.Config.ARGB_8888 的内存序）；
+         *               为 null 表示当前没有字幕，监听方应清空画面
+         * @param width  位图宽度
+         * @param height 位图高度
+         * @param left   位图左上角在视频画面内的 x（视频原始像素坐标系）
+         * @param top    位图左上角在视频画面内的 y
+         */
+        void onSubtitleBitmap(byte[] rgba, int width, int height, int left, int top);
+    }
+
+    private volatile OnSubtitleBitmapListener mOnSubtitleBitmapListener;
+
+    /** 设置（或传 null 清除）字幕位图监听器；回调发生在 native 视频线程。 */
+    public void setOnSubtitleBitmapListener(OnSubtitleBitmapListener listener) {
+        mOnSubtitleBitmapListener = listener;
+    }
+
+    public OnSubtitleBitmapListener getOnSubtitleBitmapListener() {
+        return mOnSubtitleBitmapListener;
+    }
+
+    /** 由 native 视频线程调用，不要在 Java 侧直接调用。 */
+    @SuppressWarnings("unused")
+    private void _onSubtitleBitmap(byte[] rgba, int width, int height, int left, int top) {
+        OnSubtitleBitmapListener listener = mOnSubtitleBitmapListener;
+        if (listener != null) {
+            listener.onSubtitleBitmap(rgba, width, height, left, top);
+        }
+    }
 }

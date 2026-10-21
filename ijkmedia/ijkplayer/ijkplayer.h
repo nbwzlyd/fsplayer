@@ -164,6 +164,11 @@ const char     *ijkmp_version(void);
 IjkMediaPlayer *ijkmp_create(int (*msg_loop)(void*));
 
 void*           ijkmp_set_inject_opaque(IjkMediaPlayer *mp, void *opaque);
+
+/* 直出方案：字幕 RGBA 位图回调（由 Android JNI 层注册，转发给 Java 绘制） */
+void            ijkmp_set_subtitle_bitmap_callback(IjkMediaPlayer *mp,
+                                                   void (*callback)(void *opaque, const uint8_t *rgba, int w, int h, int x, int y),
+                                                   void *opaque);
 void*           ijkmp_set_ijkio_inject_opaque(IjkMediaPlayer *mp, void *opaque);
 void            ijkmp_set_option(IjkMediaPlayer *mp, int opt_category, const char *name, const char *value);
 void            ijkmp_set_option_int(IjkMediaPlayer *mp, int opt_category, const char *name, int64_t value);

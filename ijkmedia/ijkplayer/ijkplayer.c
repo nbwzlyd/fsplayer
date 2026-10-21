@@ -148,6 +148,17 @@ void *ijkmp_set_inject_opaque(IjkMediaPlayer *mp, void *opaque)
     return prev_weak_thiz;
 }
 
+void ijkmp_set_subtitle_bitmap_callback(IjkMediaPlayer *mp,
+                                       void (*callback)(void *opaque, const uint8_t *rgba, int w, int h, int x, int y),
+                                       void *opaque)
+{
+    assert(mp);
+
+    pthread_mutex_lock(&mp->mutex);
+    ffp_set_subtitle_bitmap_callback(mp->ffplayer, callback, opaque);
+    pthread_mutex_unlock(&mp->mutex);
+}
+
 void *ijkmp_set_ijkio_inject_opaque(IjkMediaPlayer *mp, void *opaque)
 {
     assert(mp);

@@ -86,6 +86,10 @@ list(FILTER SOURCE_IJKPLAYER EXCLUDE REGEX "/apple/")
 list(FILTER SOURCE_IJKPLAYER EXCLUDE REGEX "ijkhls")
 list(FILTER SOURCE_IJKPLAYER EXCLUDE REGEX "ijksegment")
 
+# 直出（zero-GPU）方案：Vulkan 渲染器整套下线
+list(FILTER SOURCE_SDL EXCLUDE REGEX "/vulkan/")
+list(FILTER SOURCE_SDL EXCLUDE REGEX "ijksdl_vout_android_vulkan")
+
 add_library(fsplayer SHARED ${SOURCE_IJKJ4A} ${SOURCE_SDL} ${SOURCE_IJKPLAYER} ${SOURCE_SOUNDTOUCH})
 
 # 排查用（二分定位）：./gradlew :demo:assembleDebug -PfsNoVulkan=1
@@ -127,7 +131,6 @@ set(FONTCONFIG_LIB ${UNI_DIR}/fontconfig/fontconfig-${ARCH}/lib/libfontconfig.a)
 find_library(z-lib z REQUIRED)
 find_library(log-lib log)
 find_library(android-lib android)
-find_library(vulkan-lib vulkan)
 find_library(jnigraphics-lib jnigraphics)
 find_library(m-lib m)
 find_library(mediandk-lib mediandk)
@@ -156,7 +159,6 @@ target_link_libraries(fsplayer
     ${mediandk-lib}
     ${log-lib}
     ${android-lib}
-    ${vulkan-lib}
     ${jnigraphics-lib}
     ${m-lib}
     "-Wl,-z,max-page-size=16384"

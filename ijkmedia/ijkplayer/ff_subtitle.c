@@ -348,6 +348,152 @@ int ff_sub_get_texture(FFSubtitle *sub, double pts, SDL_GPU *gpu, SDL_TextureOve
     return r;
 }
 
+
+/*
+ * 直出（zero-GPU）方案的字幕出口：
+ * 不再把字幕合成进视频帧，而是把 libass / PGS 的渲染结果转成一张 RGBA 位图，
+ * 交给 Java 层用普通 View 画在 SurfaceView 之上（与 media3 的字幕交付方式同构）。
+ *
+ * 返回： 1  有新位图，*pixels 由调用方 free
+ *        0  内容无变化（保持上一帧，不必重传）
+ *     -100  字幕帧尚未就绪（保持 FF_SUB_PENDING 原语义）
+ *       <0  当前无字幕（调用方应清空）
+ */
+int ff_sub_get_rgba(FFSubtitle *sub, double pts, int video_w, int video_h,
+                    uint8_t **pixels, int *pw, int *ph, int *px, int *py)
+{
+    if (!sub || !pixels || !pw || !ph || !px || !py)
+        return -1;
+    *pixels = NULL;
+    *pw = *ph = *px = *py = 0;
+
+    FFSubtitleBufferPacket packet = {0};
+    int r = ff_sub_upload_buffer(sub, pts, &packet);
+    if (r <= 0) {
+        FreeSubtitleBufferArray(&packet);
+        return r;
+    }
+
+    if (packet.isAss) {
+        /* libass 文本字幕：libass 已经把整条字幕合成到一张 RGBA32 脏矩形里了 */
+        if (packet.len <= 0 || !packet.e[0] || !packet.e[0]->data) {
+            FreeSubtitleBufferArray(&packet);
+            return -1;
+        }
+        FFSubtitleBuffer *b = packet.e[0];
+        int w = b->rect.w;
+        int h = b->rect.h;
+        if (w <= 0 || h <= 0) {
+            FreeSubtitleBufferArray(&packet);
+            return -1;
+        }
+        uint8_t *out = (uint8_t *) malloc((size_t) w * h * 4);
+        if (!out) {
+            FreeSubtitleBufferArray(&packet);
+            return -1;
+        }
+        /* libass 合成出来是 BGRA 内存序，Android Bitmap(ARGB_8888) 要 RGBA */
+        for (int y = 0; y < h; y++) {
+            const uint8_t *src = b->data + (size_t) y * b->rect.stride;
+            uint8_t *dst = out + (size_t) y * w * 4;
+            for (int x = 0; x < w; x++) {
+                dst[0] = src[2];
+                dst[1] = src[1];
+                dst[2] = src[0];
+                dst[3] = src[3];
+                src += 4;
+                dst += 4;
+            }
+        }
+        *pixels = out;
+        *pw = w;
+        *ph = h;
+        *px = b->rect.x;
+        *py = b->rect.y;
+        FreeSubtitleBufferArray(&packet);
+        return 1;
+    }
+
+    /*
+     * 位图字幕（PGS / DVD subpicture）：每块是 A8 遮罩 + 256 色调色板，
+     * 这里用 CPU 展开成一块 RGBA 画布（只覆盖所有块的外接矩形）。
+     */
+    {
+        if (packet.len <= 0) {
+            FreeSubtitleBufferArray(&packet);
+            return -1;
+        }
+        int cx0 = INT_MAX, cy0 = INT_MAX, cx1 = 0, cy1 = 0;
+        int water_mark = video_h > 0 ? (int) ((double) video_h * SUBTITLE_MOVE_WATERMARK) : INT_MAX;
+        int bottom_offset = packet.bottom_margin;
+        for (int i = 0; i < packet.len; i++) {
+            FFSubtitleBuffer *b = packet.e[i];
+            if (!b || !b->data || b->rect.w <= 0 || b->rect.h <= 0)
+                continue;
+            int off = (b->rect.y > water_mark) ? bottom_offset : 0;
+            int x0 = b->rect.x;
+            int y0 = b->rect.y - off;
+            if (x0 < cx0) cx0 = x0;
+            if (y0 < cy0) cy0 = y0;
+            if (x0 + b->rect.w > cx1) cx1 = x0 + b->rect.w;
+            if (y0 + b->rect.h > cy1) cy1 = y0 + b->rect.h;
+        }
+        if (cx1 <= cx0 || cy1 <= cy0) {
+            FreeSubtitleBufferArray(&packet);
+            return -1;
+        }
+        int w = cx1 - cx0;
+        int h = cy1 - cy0;
+        uint8_t *out = (uint8_t *) calloc((size_t) w * h * 4, 1);
+        if (!out) {
+            FreeSubtitleBufferArray(&packet);
+            return -1;
+        }
+        for (int i = 0; i < packet.len; i++) {
+            FFSubtitleBuffer *b = packet.e[i];
+            if (!b || !b->data || b->rect.w <= 0 || b->rect.h <= 0)
+                continue;
+            int off = (b->rect.y > water_mark) ? bottom_offset : 0;
+            int dx0 = b->rect.x - cx0;
+            int dy0 = b->rect.y - off - cy0;
+            for (int y = 0; y < b->rect.h; y++) {
+                int oy = dy0 + y;
+                if (oy < 0 || oy >= h)
+                    continue;
+                const uint8_t *src = b->data + (size_t) y * b->rect.stride;
+                uint8_t *dst = out + ((size_t) oy * w + dx0) * 4;
+                for (int x = 0; x < b->rect.w; x++) {
+                    int ox = dx0 + x;
+                    if (ox >= 0 && ox < w) {
+                        unsigned int a8 = src[x];
+                        if (a8) {
+                            unsigned int c = b->palette[a8];
+                            unsigned int cr = (c >> 16) & 0xff;
+                            unsigned int cg = (c >>  8) & 0xff;
+                            unsigned int cb =  c        & 0xff;
+                            unsigned int ca = (c >> 24) & 0xff;
+                            ca = ca * a8 / 255;
+                            /* ARGB_8888 默认预乘 alpha */
+                            dst[0] = (uint8_t) (cr * ca / 255);
+                            dst[1] = (uint8_t) (cg * ca / 255);
+                            dst[2] = (uint8_t) (cb * ca / 255);
+                            dst[3] = (uint8_t) ca;
+                        }
+                    }
+                    dst += 4;
+                }
+            }
+        }
+        *pixels = out;
+        *pw = w;
+        *ph = h;
+        *px = cx0;
+        *py = cy0;
+        FreeSubtitleBufferArray(&packet);
+        return 1;
+    }
+}
+
 void ff_sub_stream_ic_ready(FFSubtitle *sub, AVFormatContext* ic, int video_w, int video_h)
 {
     if (!sub) {

@@ -28,6 +28,6 @@
 #include "../ijksdl.h"
 
 #include "ijksdl_aout_android_audiotrack.h"
-#include "ijksdl_vout_android_vulkan.h"
+#include "ijksdl_vout_android.h"
 
 #endif

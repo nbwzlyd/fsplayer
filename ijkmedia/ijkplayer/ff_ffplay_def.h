@@ -595,6 +595,14 @@ typedef struct FFPlayer {
 
     void               *inject_opaque;
     void               *ijkio_inject_opaque;
+
+    /*
+     * 直出方案：字幕不再合成进视频帧（没有 GPU 合成器了），
+     * 改为把 libass/PGS 渲染出的 RGBA 位图回调给 Java 层去画（与 media3 同构）。
+     * rgba == NULL 表示「当前无字幕」，Java 侧应清空。
+     */
+    void             (*subtitle_bitmap_callback)(void *opaque, const uint8_t *rgba, int w, int h, int x, int y);
+    void              *subtitle_bitmap_opaque;
     FFStatistic         stat;
     FFDemuxCacheControl dcc;
 

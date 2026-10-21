@@ -53,6 +53,13 @@ int ff_sub_get_current_stream(FFSubtitle *sub, int *pending);
 int ff_sub_current_stream_type(FFSubtitle *sub);
 
 int ff_sub_get_texture(FFSubtitle *sub, double pts, SDL_GPU *gpu, SDL_TextureOverlay **texture);
+
+/*
+ * 直出方案的字幕出口：把当前时刻的字幕渲染成 RGBA 位图（不碰 GPU）。
+ * 返回 1=有新位图（*pixels 需 free）、0=无变化、-100=未就绪、<0=无字幕。
+ */
+int ff_sub_get_rgba(FFSubtitle *sub, double pts, int video_w, int video_h,
+                    uint8_t **pixels, int *pw, int *ph, int *px, int *py);
 int ff_sub_drop_old_frames(FFSubtitle *sub);
 int ff_sub_frame_cache_remaining(FFSubtitle *sub);
 

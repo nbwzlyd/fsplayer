@@ -721,6 +721,65 @@ FSPlayer_native_init(JNIEnv *env)
     MPTRACE("%s\n", __func__);
 }
 
+
+/* ------------------------------------------------------------------ */
+/* 直出方案：字幕位图回调（native -> Java）                             */
+/* ------------------------------------------------------------------ */
+static pthread_mutex_t g_sub_cb_mutex  = PTHREAD_MUTEX_INITIALIZER;
+static jmethodID       g_sub_cb_method = NULL;
+
+static jmethodID subtitle_bitmap_method(JNIEnv *env, jobject weak_thiz)
+{
+    jmethodID mid = NULL;
+    pthread_mutex_lock(&g_sub_cb_mutex);
+    if (!g_sub_cb_method) {
+        jclass cls = (*env)->GetObjectClass(env, weak_thiz);
+        if (cls) {
+            g_sub_cb_method = (*env)->GetMethodID(env, cls,
+                                                  "_onSubtitleBitmap", "([BIIII)V");
+            (*env)->DeleteLocalRef(env, cls);
+        }
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+            g_sub_cb_method = NULL;
+        }
+    }
+    mid = g_sub_cb_method;
+    pthread_mutex_unlock(&g_sub_cb_mutex);
+    return mid;
+}
+
+static void subtitle_bitmap_callback(void *opaque, const uint8_t *rgba, int w, int h, int x, int y)
+{
+    JNIEnv *env = NULL;
+    if (!opaque)
+        return;
+    if (JNI_OK != SDL_JNI_SetupThreadEnv(&env) || !env)
+        return;
+
+    jobject weak_thiz = (jobject) opaque;
+    jmethodID mid = subtitle_bitmap_method(env, weak_thiz);
+    if (!mid)
+        return;
+
+    jbyteArray arr = NULL;
+    if (rgba && w > 0 && h > 0) {
+        jsize len = (jsize) ((size_t) w * (size_t) h * 4);
+        arr = (*env)->NewByteArray(env, len);
+        if (!arr)
+            goto done;
+        (*env)->SetByteArrayRegion(env, arr, 0, len, (const jbyte *) rgba);
+    }
+    /* arr == NULL 表示「当前无字幕」，Java 侧负责清空 */
+    (*env)->CallVoidMethod(env, weak_thiz, mid, arr, (jint) w, (jint) h, (jint) x, (jint) y);
+
+done:
+    if (arr)
+        (*env)->DeleteLocalRef(env, arr);
+    if ((*env)->ExceptionCheck(env))
+        (*env)->ExceptionClear(env);
+}
+
 static void
 FSPlayer_native_setup(JNIEnv *env, jobject thiz, jobject weak_this)
 {
@@ -733,6 +792,7 @@ FSPlayer_native_setup(JNIEnv *env, jobject thiz, jobject weak_this)
     ijkmp_set_inject_opaque(mp, ijkmp_get_weak_thiz(mp));
     ijkmp_set_ijkio_inject_opaque(mp, ijkmp_get_weak_thiz(mp));
     ijkmp_android_set_mediacodec_select_callback(mp, mediacodec_select_callback, ijkmp_get_weak_thiz(mp));
+    ijkmp_set_subtitle_bitmap_callback(mp, subtitle_bitmap_callback, ijkmp_get_weak_thiz(mp));
 
 LABEL_RETURN:
     ijkmp_dec_ref_p(&mp);

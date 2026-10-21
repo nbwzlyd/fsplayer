@@ -40,6 +40,15 @@
 #include "libavutil/mem.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/dict.h"
+
+#if defined(__ANDROID__)
+/*
+ * 硬解直出需要：AVMediaCodecBuffer / av_mediacodec_release_buffer（显示时刻上屏），
+ * 以及 SurfaceView 的 ANativeWindow（交给 MediaCodec 当解码输出目标）。
+ */
+#include <android/native_window.h>
+#include <libavcodec/mediacodec.h>
+#endif
 #include "libavutil/samplefmt.h"
 #include "libavutil/time.h"
 #include "libavutil/bprint.h"
@@ -77,7 +86,7 @@
 #include <stdatomic.h>
 #if defined(__ANDROID__)
 #include "ijksoundtouch/ijksoundtouch_wrap.h"
-#include "ijksdl/android/ijksdl_vout_android_vulkan.h"
+#include "ijksdl/android/ijksdl_vout_android.h"
 #elif defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
@@ -534,7 +543,28 @@ static void video_image_display2(FFPlayer *ffp)
             int r = ff_apply_subtitle_stream_change(ffp);
             //has stream
             if (ffp->subtitle_mix && ff_sub_get_current_stream(is->ffSub, NULL) >= 0) {
-                int got = ff_sub_get_texture(is->ffSub, vp->pts, ffp->gpu, &sub_overlay);
+                int got = 0;
+#if defined(__ANDROID__)
+                /*
+                 * 直出方案：没有 GPU 合成器了，字幕改为渲染成 RGBA 位图回调给 Java 绘制。
+                 * >0 有新内容、==0 无变化（保留上一帧）、<0 无字幕（通知 Java 清空）。
+                 */
+                if (ffp->subtitle_bitmap_callback) {
+                    uint8_t *sub_rgba = NULL;
+                    int sub_w = 0, sub_h = 0, sub_x = 0, sub_y = 0;
+                    got = ff_sub_get_rgba(is->ffSub, vp->pts, vp->disp_w, vp->disp_h,
+                                          &sub_rgba, &sub_w, &sub_h, &sub_x, &sub_y);
+                    if (got > 0 && sub_rgba) {
+                        ffp->subtitle_bitmap_callback(ffp->subtitle_bitmap_opaque,
+                                                      sub_rgba, sub_w, sub_h, sub_x, sub_y);
+                        free(sub_rgba);
+                    } else if (got < 0 && got != FF_SUB_PENDING) {
+                        /* 真正“没有字幕”才清空；FF_SUB_PENDING 只是这一帧还没就绪，清了会闪 */
+                        ffp->subtitle_bitmap_callback(ffp->subtitle_bitmap_opaque, NULL, 0, 0, 0, 0);
+                    }
+                }
+#else
+                got = ff_sub_get_texture(is->ffSub, vp->pts, ffp->gpu, &sub_overlay);
                 //when got equal to -100 means the ass subtitle frame not ready,need retry!
                 if (!sub_overlay && (r > 0 || got == FF_SUB_PENDING) && is->pause_req) {
                     //give one more chance
@@ -542,6 +572,7 @@ static void video_image_display2(FFPlayer *ffp)
                     av_usleep(3*1000);
                     return;
                 }
+#endif
             }
         }
         
@@ -553,6 +584,14 @@ static void video_image_display2(FFPlayer *ffp)
             while (is->pause_req && !is->abort_request) {
                 SDL_Delay(20);
             }
+        }
+        /*
+         * 硬解直出：MediaCodec 的输出 buffer 还没上屏，要在“显示这一刻”才 release(render=1)，
+         * 否则画面会脱离 A/V 同步（解码完就立刻刷出来）。重复调用是安全的：
+         * FFmpeg 内部用 released 标记做过一次幂等。
+         */
+        if (vp->frame && vp->frame->format == AV_PIX_FMT_MEDIACODEC && vp->frame->data[3]) {
+            av_mediacodec_release_buffer((AVMediaCodecBuffer *) vp->frame->data[3], 1);
         }
         SDL_VoutDisplayYUVOverlay(ffp->vout, vp, sub_overlay);
         SDL_TextureOverlay_Release(&sub_overlay);
@@ -3282,10 +3321,11 @@ static int hw_decoder_init(AVCodecContext * ctx, const AVCodecHWConfig* config) 
 
 #if defined(__ANDROID__)
 #include <libavcodec/mediacodec.h>
+#include <android/native_window.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_mediacodec.h>
 #include "ijksdl/android/ijksdl_android_jni.h"
-#include "ijksdl/android/ijksdl_vout_android_vulkan.h"
+#include "ijksdl/android/ijksdl_vout_android.h"
 
 /*
  * FFmpeg 把 MediaCodec 实现成独立解码器（h264_mediacodec / hevc_mediacodec ...），
@@ -3335,13 +3375,15 @@ static enum AVPixelFormat get_hw_format_mediacodec(AVCodecContext *ctx,
 static void mediacodec_device_free(AVHWDeviceContext *ctx)
 {
     AVMediaCodecDeviceContext *hwctx = ctx->hwctx;
-    JNIEnv *env = NULL;
 
-    if (hwctx && hwctx->surface && JNI_OK == SDL_JNI_SetupThreadEnv(&env))
-        (*env)->DeleteGlobalRef(env, hwctx->surface);
+    /* 直出：我们欠 MediaCodec 一份 ANativeWindow 引用，随 device 释放归还 */
+    if (hwctx && hwctx->native_window)
+        ANativeWindow_release((ANativeWindow *) hwctx->native_window);
 
-    if (hwctx)
+    if (hwctx) {
+        hwctx->native_window = NULL;
         hwctx->surface = NULL;
+    }
     ctx->user_opaque = NULL;
 }
 
@@ -3378,25 +3420,25 @@ static int ffp_android_mediacodec_init(FFPlayer *ffp, AVCodecContext *avctx, con
         return -1;
     }
 
-    JNIEnv *env = NULL;
-    if (JNI_OK != SDL_JNI_SetupThreadEnv(&env))
-        return -1;
-
-    jobject surface = SDL_VoutAndroid_GetMediaCodecSurface(env, ffp->vout);
-    if (!surface)
+    /*
+     * 直出：把 SurfaceView 的 ANativeWindow 直接交给 MediaCodec 作为解码输出目标。
+     * FFmpeg 负责解码并持有 output buffer，但不会自己渲染（release 时 render=0），
+     * 由我们在“显示时刻”调用 av_mediacodec_release_buffer(buffer, 1) 上屏，
+     * 这样 A/V 同步仍由 ffplay 的帧队列掌握 —— 与 media3 的直出方式一致。
+     */
+    ANativeWindow *window = SDL_VoutAndroid_GetNativeWindow(ffp->vout);
+    if (!window)
         return -1;
 
     AVBufferRef *device_ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_MEDIACODEC);
-    if (!device_ref) {
-        (*env)->DeleteLocalRef(env, surface);
+    if (!device_ref)
         return -1;
-    }
 
     AVHWDeviceContext *dev_ctx = (AVHWDeviceContext *) device_ref->data;
     AVMediaCodecDeviceContext *hwctx = dev_ctx->hwctx;
-    hwctx->surface = (*env)->NewGlobalRef(env, surface);
-    (*env)->DeleteLocalRef(env, surface);
-    if (!hwctx->surface) {
+    ANativeWindow_acquire(window);
+    hwctx->native_window = window;
+    if (!hwctx->native_window) {
         av_buffer_unref(&device_ref);
         return -1;
     }
@@ -3672,8 +3714,10 @@ static int stream_component_open(FFPlayer *ffp, int stream_index)
     if (avctx->codec_type == AVMEDIA_TYPE_VIDEO &&
         !(st->disposition & AV_DISPOSITION_ATTACHED_PIC) &&
         ffp_android_mediacodec_wanted(ffp, avctx->codec_id)) {
-        if (ffp_android_mediacodec_init(ffp, avctx, codec) == 0)
-            ALOGI("try use mediacodec accel: %s\n", codec->name);
+        if (ffp_android_mediacodec_init(ffp, avctx, codec) == 0) {
+            ALOGI("try use mediacodec direct output: %s\n", codec->name);
+            SDL_VoutAndroid_SetDirectDecodeActive(ffp->vout, 1);
+        }
 
         /*
          * MP4 里是 AVCC（长度前缀），MediaCodec 只吃 Annex-B：把 extradata
@@ -5244,6 +5288,16 @@ void *ffp_set_inject_opaque(FFPlayer *ffp, void *opaque)
     //ffp_set_option_int(ffp, FFP_OPT_CATEGORY_FORMAT, "ijkapplication", (int64_t)(intptr_t)ffp->app_ctx);
     ffp->app_ctx->func_on_app_event = app_func_event;
     return prev_weak_thiz;
+}
+
+void ffp_set_subtitle_bitmap_callback(FFPlayer *ffp,
+                                      void (*callback)(void *opaque, const uint8_t *rgba, int w, int h, int x, int y),
+                                      void *opaque)
+{
+    if (!ffp)
+        return;
+    ffp->subtitle_bitmap_callback = callback;
+    ffp->subtitle_bitmap_opaque   = opaque;
 }
 
 void ffp_set_option(FFPlayer *ffp, int opt_category, const char *name, const char *value)
