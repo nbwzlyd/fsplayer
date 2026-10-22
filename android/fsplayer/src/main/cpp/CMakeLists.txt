@@ -162,4 +162,8 @@ target_link_libraries(fsplayer
     ${jnigraphics-lib}
     ${m-lib}
     "-Wl,-z,max-page-size=16384"
-    "-Wl,-Bsymbolic")
+    "-Wl,-Bsymbolic"
+    # 瘦身：只导出 JNI 入口（RegisterNatives 动态注册 + JNI_OnLoad*），
+    # 5800+ 个 FFmpeg 内部符号不再进 .dynsym/.dynstr（省 ~1MB，dlopen 更快）。
+    # JNI 全走 RegisterNatives，无外部按符号查找的依赖，可安全收紧。
+    "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/exports.map")
