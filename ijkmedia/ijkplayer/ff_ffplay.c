@@ -6022,13 +6022,21 @@ int ffp_reload_video_stream(FFPlayer *ffp)
     
     if (stream >= 0) {
         av_log(ffp, AV_LOG_INFO, "ffp_reload_video_stream: reloading stream %d\n", stream);
-        
+
         // 1. Get current position/playback time before closing the component
         long current_pos = ffp_get_current_position_l(ffp);
 
         // Sync dynamic player options from options dictionary to struct fields
         av_opt_set_dict(ffp, &ffp->player_opts);
-        
+
+        /*
+         * 重置首帧标志：VIDEO_RENDERING_START 只在 first_video_frame_rendered==0
+         * 的首帧发一次，reload 后上层（VideoView）若因 seek 卡在 BUFFERING/loading，
+         * 没有这条消息就永远消不掉。重置后 seek 回来的第一帧会自然补发
+         * RENDERING_START，等价于 Exo surface 重挂后 reconfigure 完成的信号。
+         */
+        ffp->first_video_frame_rendered = 0;
+
         if (is->video_stream >= 0) {
             stream_component_close(ffp, is->video_stream);
         }
