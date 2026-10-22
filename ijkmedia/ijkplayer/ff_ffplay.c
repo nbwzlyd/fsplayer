@@ -2628,10 +2628,30 @@ static int ffplay_video_thread(void *arg)
 
     for (;;) {
         ret = get_video_frame(ffp, frame);
-        if (ret < 0)
+        if (ret < 0) {
+            SDL_VoutAndroid_DebugLog("gvf err=%d", ret);
             goto the_end;
+        }
         if (!ret)
             continue;
+        {
+            static int nv = 0;
+            static int64_t last_dump = 0;
+            static int frames = 0;
+            frames++;
+            if (nv < 4)
+                SDL_VoutAndroid_DebugLog("gvf n=%d fmt=%d %dx%d", nv++, frame->format, frame->width, frame->height);
+            int64_t now = av_gettime_relative() / 1000;   /* ms */
+            if (now - last_dump >= 2000) {
+                ANativeWindow *w = SDL_VoutAndroid_GetNativeWindow(ffp->vout);
+                SDL_VoutAndroid_DebugLog("STATE fmt=%d win=%p w=%d h=%d frames=%d decode_fps=%.1f",
+                                         frame->format, (void *) w,
+                                         w ? ANativeWindow_getWidth(w) : -1,
+                                         w ? ANativeWindow_getHeight(w) : -1,
+                                         frames, frames * 1000.0 / (now > 0 ? now : 1));
+                last_dump = now;
+            }
+        }
 
 #if CONFIG_VIDEO_AVFILTER
         ret = ffp_video_filter_process(ffp, &vf_ctx, frame, on_video_picture_output, is);
@@ -3775,6 +3795,10 @@ static int stream_component_open(FFPlayer *ffp, int stream_index)
             ret = avcodec_open2(avctx, codec, &opts);
         }
     }
+#endif
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("open2 codec=%s ret=%d pixfmt=%d mc=%d", codec->name, ret,
+                             (int) avctx->pix_fmt, mediacodec_attached);
 #endif
     if (ret < 0)
         goto fail;

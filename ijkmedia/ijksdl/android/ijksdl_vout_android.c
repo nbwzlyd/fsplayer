@@ -298,8 +298,12 @@ static void blit_rotated(uint8_t *dst_base, int dst_stride, int dst_x, int dst_y
 static int vout_display_overlay_l(SDL_Vout *vout, const Frame *frame, SDL_TextureOverlay *sub_overlay)
 {
     SDL_Vout_Opaque *opaque = vout->opaque;
-    if (!opaque || !opaque->window)
+    if (!opaque || !opaque->window) {
+        static int n_nowin = 0;
+        if ((n_nowin++ % 50) == 0)
+            SDL_VoutAndroid_DebugLog("no-window n=%d", n_nowin - 1);
         return 0;
+    }
 
     (void) sub_overlay; /* 字幕由 Java 层绘制，这里不处理 */
 
@@ -309,9 +313,19 @@ static int vout_display_overlay_l(SDL_Vout *vout, const Frame *frame, SDL_Textur
 
     /* 硬解直出：MediaCodec 已经直接把 buffer 投到 Surface，这里什么都不做 */
     if (av_frame->format == AV_PIX_FMT_MEDIACODEC) {
+        static int n_mc = 0;
         opaque->diag_path = 1;
         opaque->diag_pixfmt = av_frame->format;
+        if ((n_mc++ % 25) == 0)
+            SDL_VoutAndroid_DebugLog("mcdisp n=%d win=%p w=%d", n_mc - 1, (void *) opaque->window,
+                                     ANativeWindow_getWidth(opaque->window));
         return 0;
+    }
+    {
+        static int n_soft = 0;
+        if ((n_soft++ % 25) == 0)
+            SDL_VoutAndroid_DebugLog("softdisp n=%d fmt=%d win=%p", n_soft - 1, av_frame->format,
+                                     (void *) opaque->window);
     }
 
     opaque->diag_pixfmt = av_frame->format;
