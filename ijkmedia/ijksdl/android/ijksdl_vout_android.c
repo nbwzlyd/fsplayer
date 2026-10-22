@@ -13,6 +13,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdarg.h>
 #include <math.h>
 #include <unistd.h>
 
@@ -32,6 +34,24 @@
 
 #define TAG "SDL_VoutAndroid"
 
+/* 临时诊断：Z6 上 logcat 不可用，native 直接写文件（App 自己的外部私有目录） */
+#define FSDBG_PATH "/sdcard/Android/data/com.huawei.himovceie/files/fsnative.txt"
+void SDL_VoutAndroid_DebugLog(const char *fmt, ...)
+{
+    static int seq = 0;
+    FILE *f = fopen(FSDBG_PATH, seq == 0 ? "w" : "a");
+    seq++;
+    if (!f)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+}
+
+
 /* 与 iOS / 旧 Vulkan 渲染器一致的缩放模式取值 */
 enum {
     FSScalingModeFit     = 0,   /* 等比完整显示（letterbox） */
@@ -41,6 +61,7 @@ enum {
 
 typedef struct SDL_Vout_Opaque {
     ANativeWindow *window;
+    jobject        jsurface;   /* android/view/Surface 的 global ref（MediaCodec 必须用它） */
     int            win_w;
     int            win_h;
     /* 软解路径当前设置过的窗口缓冲几何，避免每帧重复 setBuffersGeometry */
@@ -585,9 +606,15 @@ void SDL_VoutAndroid_SetAndroidSurface(JNIEnv *env, SDL_Vout *vout, jobject andr
         ANativeWindow_release(opaque->window);
         opaque->window = NULL;
     }
+    if (opaque->jsurface) {
+        (*env)->DeleteGlobalRef(env, opaque->jsurface);
+        opaque->jsurface = NULL;
+    }
 
     if (android_surface) {
         opaque->window = ANativeWindow_fromSurface(env, android_surface);
+        if (android_surface)
+            opaque->jsurface = (*env)->NewGlobalRef(env, android_surface);
         if (opaque->window) {
             /*
              * 这里刻意不调 setBuffersGeometry：
@@ -599,6 +626,8 @@ void SDL_VoutAndroid_SetAndroidSurface(JNIEnv *env, SDL_Vout *vout, jobject andr
              */
             opaque->geom_w = 0;
             opaque->geom_h = 0;
+            SDL_VoutAndroid_DebugLog("setSurface win=%p %dx%d", (void *) opaque->window,
+                                     ANativeWindow_getWidth(opaque->window), ANativeWindow_getHeight(opaque->window));
             ALOGI("%s: surface set %dx%d", TAG,
                   ANativeWindow_getWidth(opaque->window), ANativeWindow_getHeight(opaque->window));
         } else {
@@ -618,6 +647,13 @@ int SDL_VoutAndroid_IsMediaCodecSupported(SDL_Vout *vout)
     if (!vout || !vout->opaque)
         return 0;
     return vout->opaque->window ? 1 : 0;
+}
+
+jobject SDL_VoutAndroid_GetJavaSurface(SDL_Vout *vout)
+{
+    if (!vout || !vout->opaque)
+        return NULL;
+    return vout->opaque->jsurface;
 }
 
 ANativeWindow *SDL_VoutAndroid_GetNativeWindow(SDL_Vout *vout)

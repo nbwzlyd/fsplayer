@@ -590,8 +590,20 @@ static void video_image_display2(FFPlayer *ffp)
          * 否则画面会脱离 A/V 同步（解码完就立刻刷出来）。重复调用是安全的：
          * FFmpeg 内部用 released 标记做过一次幂等。
          */
-        if (vp->frame && vp->frame->format == AV_PIX_FMT_MEDIACODEC && vp->frame->data[3]) {
-            av_mediacodec_release_buffer((AVMediaCodecBuffer *) vp->frame->data[3], 1);
+        {
+            static int rel_dbg = 0;
+            if (rel_dbg < 6) {
+                rel_dbg++;
+                int fmt = vp->frame ? vp->frame->format : -999;
+                void *buf = (vp->frame && vp->frame->data[3]) ? vp->frame->data[3] : NULL;
+                int rc = -1;
+                if (fmt == AV_PIX_FMT_MEDIACODEC && buf)
+                    rc = av_mediacodec_release_buffer((AVMediaCodecBuffer *) buf, 1);
+                SDL_VoutAndroid_DebugLog("disp fmt=%d buf=%p rc=%d win=%p", fmt, buf, rc,
+                                         (void *) SDL_VoutAndroid_GetNativeWindow(ffp->vout));
+            } else if (vp->frame && vp->frame->format == AV_PIX_FMT_MEDIACODEC && vp->frame->data[3]) {
+                av_mediacodec_release_buffer((AVMediaCodecBuffer *) vp->frame->data[3], 1);
+            }
         }
         SDL_VoutDisplayYUVOverlay(ffp->vout, vp, sub_overlay);
         SDL_TextureOverlay_Release(&sub_overlay);
@@ -3426,8 +3438,16 @@ static int ffp_android_mediacodec_init(FFPlayer *ffp, AVCodecContext *avctx, con
      * 由我们在“显示时刻”调用 av_mediacodec_release_buffer(buffer, 1) 上屏，
      * 这样 A/V 同步仍由 ffplay 的帧队列掌握 —— 与 media3 的直出方式一致。
      */
-    ANativeWindow *window = SDL_VoutAndroid_GetNativeWindow(ffp->vout);
-    if (!window)
+    /*
+     * 关键：FFmpeg 的 MediaCodec(Java 路径) configure 只认 android/view/Surface
+     * （mediacodec_wrapper.c: jobject *surface = window ? window->surface : NULL）。
+     * 只给 native_window 时 window->surface 仍是 NULL → configure(…, NULL, …)
+     * 退化成 ByteBuffer 模式：帧被当成“已上屏”地 wrap 出来，release(render=1) 静默失效，
+     * 表现为有声音没画面。所以优先传 Java Surface。
+     */
+    jobject jsurface = SDL_VoutAndroid_GetJavaSurface(ffp->vout);
+    ANativeWindow *window = jsurface ? NULL : SDL_VoutAndroid_GetNativeWindow(ffp->vout);
+    if (!jsurface && !window)
         return -1;
 
     AVBufferRef *device_ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_MEDIACODEC);
@@ -3436,12 +3456,14 @@ static int ffp_android_mediacodec_init(FFPlayer *ffp, AVCodecContext *avctx, con
 
     AVHWDeviceContext *dev_ctx = (AVHWDeviceContext *) device_ref->data;
     AVMediaCodecDeviceContext *hwctx = dev_ctx->hwctx;
-    ANativeWindow_acquire(window);
-    hwctx->native_window = window;
-    if (!hwctx->native_window) {
-        av_buffer_unref(&device_ref);
-        return -1;
+    if (jsurface) {
+        hwctx->surface = (void *) jsurface;   /* 由 vout 持有 global ref，device 只借用 */
+    } else {
+        ANativeWindow_acquire(window);
+        hwctx->native_window = window;
     }
+    SDL_VoutAndroid_DebugLog("mcInit surface=%p win=%p codec=%s", (void *) jsurface, (void *) window,
+                             codec ? codec->name : "?");
 
     /* FFmpeg 解码时会自行再取一份 global ref；这一份由我们在 device 释放时回收。 */
     dev_ctx->free = mediacodec_device_free;
