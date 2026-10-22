@@ -11,9 +11,10 @@ cd "$(dirname "$0")"
 
 GLSLC="${GLSLC:-glslc}"
 if ! command -v "$GLSLC" >/dev/null 2>&1; then
+    # 不写死 NDK 版本：NDK 升级或删掉旧版本后此处不应失效
     for cand in \
         "$ANDROID_NDK_HOME/shader-tools/darwin-x86_64/glslc" \
-        "$HOME/Library/Android/sdk/ndk/27.3.13750724/shader-tools/darwin-x86_64/glslc"; do
+        "$HOME"/Library/Android/sdk/ndk/*/shader-tools/darwin-x86_64/glslc; do
         if [ -x "$cand" ]; then GLSLC="$cand"; break; fi
     done
 fi
