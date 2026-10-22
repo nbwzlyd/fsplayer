@@ -25,6 +25,7 @@
 #include "ff_packet_list.h"
 #include "ff_subtitle_ex.h"
 #include "ff_sub_component.h"
+#include "ff_subtitle_charenc.h"
 #include "ff_ffplay_debug.h"
 #include "ijksdl_gpu.h"
 #include "ijksdl/ijksdl_gpu.h"
@@ -612,6 +613,14 @@ static int open_any_stream(FFSubtitle *sub, int stream, const char *enc)
             if (!exSub_open_input(&sub->exSub, &sub->packetq, file, sub->streamStartTime, sub->opts)) {
                 AVStream *st = exSub_get_stream(sub->exSub);
                 int st_id = exSub_get_stream_id(sub->exSub);
+                // 外挂文本字幕编码探测：非 UTF-8 老字幕（GBK/BIG5/UTF-16）解码不报错、
+                // 字节透传成乱码，报错重试链永远不会触发；必须先探测并显式下
+                // sub_charenc，libass 拿到的才是正确解码后的文本。上层已指定 enc
+                // 时尊重上层。
+                char probe_enc[16] = {0};
+                if (!enc && ff_sub_detect_external_charenc(file, probe_enc, sizeof(probe_enc)) == 1) {
+                    enc = probe_enc;
+                }
                 int r = subComponent_open(&sub->com, st_id, st, &sub->packetq, &sub->frameq, enc, &retry_callback, (void *)sub, sub->video_w, sub->video_h, sub->streamStartTime);
                 if (!r) {
                     subComponent_update_preference(sub->com, &sub->sp);
