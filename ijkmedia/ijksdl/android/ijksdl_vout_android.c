@@ -35,12 +35,38 @@
 
 #define TAG "SDL_VoutAndroid"
 
-/* 临时诊断：Z6 上 logcat 不可用，native 直接写文件（App 自己的外部私有目录） */
-#define FSDBG_PATH "/sdcard/Android/data/com.huawei.himovceie/files/fsnative.txt"
+/* 临时诊断：Z6 上 logcat 不可用，native 直接写文件（App 自己的外部私有目录）。
+ * 默认关闭：release 包完全不产生 IO；只有排查时由 Java 侧显式开启。
+ * 路径由 Java 传入——同一份 .so 被 TV / Mobile 两个包名共用，不能写死包名。 */
+static char s_dbg_log_path[512] = "";
+static int s_dbg_log_enabled = 0;   /* 0=关（默认），非 0=开 */
+
+void SDL_VoutAndroid_SetDebugLogPath(const char *path)
+{
+    if (!path) {
+        s_dbg_log_path[0] = '\0';
+        return;
+    }
+    strncpy(s_dbg_log_path, path, sizeof(s_dbg_log_path) - 1);
+    s_dbg_log_path[sizeof(s_dbg_log_path) - 1] = '\0';
+}
+
+void SDL_VoutAndroid_SetDebugLogEnabled(int enabled)
+{
+    s_dbg_log_enabled = enabled ? 1 : 0;
+}
+
+int SDL_VoutAndroid_GetDebugLogEnabled(void)
+{
+    return s_dbg_log_enabled;
+}
+
 void SDL_VoutAndroid_DebugLog(const char *fmt, ...)
 {
+    if (!s_dbg_log_enabled || s_dbg_log_path[0] == '\0')
+        return;                     /* 关闭时零开销，不 open/format/write */
     static int seq = 0;
-    FILE *f = fopen(FSDBG_PATH, seq == 0 ? "w" : "a");
+    FILE *f = fopen(s_dbg_log_path, seq == 0 ? "w" : "a");
     seq++;
     if (!f)
         return;
@@ -79,6 +105,9 @@ typedef struct SDL_Vout_Opaque {
     struct SwsContext *sws;
     int            sws_src_w, sws_src_h, sws_src_fmt;
     int            sws_dst_w, sws_dst_h;
+    /* 已经喂给 sws 的矩阵/范围（+1 存储，0 表示尚未设置） */
+    int            sws_cs_applied;
+    int            sws_full_applied;
 
     /* 临时缓冲：仅在需要裁剪（FILL）或旋转 90/270 时使用 */
     uint8_t       *tmp;
@@ -99,12 +128,39 @@ typedef struct SDL_Vout_Opaque {
     int            diag_10bit;
     int            diag_path;
     int            diag_gate;
+    /* 色彩诊断：colorspace / color_range / 实际喂给 sws 的矩阵，打包见 GetFSDiag(5) */
+    int            diag_cs;        /* AVColorSpace */
+    int            diag_range;     /* AVColorRange */
+    int            diag_sws_cs;    /* 实际使用的 SWS_CS_*（-1 = 未知） */
+    int            diag_changed;   /* 本帧色彩参数是否变化（变化时打一行日志） */
 
     int            direct_active;
     int            hdr_content;
     int            hdr_allow;
     int            logged_rotate;
 } SDL_Vout_Opaque;
+
+/* 把 AVFrame 的 colorspace 映射成 swscale 的 SWS_CS_* 系数；
+ * 未标注（AVCOL_SPC_UNSPECIFIED）时按分辨率猜：>=720p 视为 BT.709（HD 惯例），否则 601。
+ * 返回 -1 表示交给默认值。 */
+static int fs_sws_cs_from_frame(const AVFrame *f)
+{
+    switch (f->colorspace) {
+        case AVCOL_SPC_BT709:       return SWS_CS_ITU709;
+        case AVCOL_SPC_BT470BG:
+        case AVCOL_SPC_SMPTE170M:   return SWS_CS_SMPTE170M;
+        case AVCOL_SPC_BT2020_NCL:
+        case AVCOL_SPC_BT2020_CL:   return SWS_CS_BT2020;
+        case AVCOL_SPC_SMPTE240M:   return SWS_CS_SMPTE240M;
+        case AVCOL_SPC_FCC:         return SWS_CS_FCC;
+        case AVCOL_SPC_UNSPECIFIED:
+        default:
+            /* 片源没标：按惯例猜，避免 HD 内容一律落到 601（那是发灰的主因之一） */
+            return (f->height >= 720 || f->width >= 1280) ? SWS_CS_ITU709 : SWS_CS_DEFAULT;
+    }
+}
+
+
 
 /* ------------------------------------------------------------------ */
 /* overlay：只作为帧队列的“令牌”，不复制像素                             */
@@ -415,6 +471,9 @@ static int vout_display_overlay_l(SDL_Vout *vout, const Frame *frame, SDL_Textur
         src_scale_h = dst_w;
     }
 
+    /* sws_getCachedContext 在参数变化时会销毁旧 ctx 重建；重建后色彩系数表回到默认，
+     * 所以这里比对指针，变了就把 applied 标记清掉，下面会重新设一遍。 */
+    struct SwsContext *sws_prev = opaque->sws;
     opaque->sws = sws_getCachedContext(opaque->sws,
                                        av_frame->width, av_frame->height,
                                        (enum AVPixelFormat) av_frame->format,
@@ -422,6 +481,10 @@ static int vout_display_overlay_l(SDL_Vout *vout, const Frame *frame, SDL_Textur
                                        AV_PIX_FMT_RGBA,
                                        SWS_BILINEAR | SWS_ACCURATE_RND,
                                        NULL, NULL, NULL);
+    if (opaque->sws != sws_prev) {
+        opaque->sws_cs_applied = 0;
+        opaque->sws_full_applied = 0;
+    }
     if (!opaque->sws) {
         ALOGE("%s: sws_getCachedContext failed fmt=%d %dx%d -> %dx%d",
               TAG, av_frame->format, av_frame->width, av_frame->height, src_scale_w, src_scale_h);
@@ -432,6 +495,41 @@ static int vout_display_overlay_l(SDL_Vout *vout, const Frame *frame, SDL_Textur
     opaque->sws_src_fmt = av_frame->format;
     opaque->sws_dst_w = src_scale_w;
     opaque->sws_dst_h = src_scale_h;
+
+    /* fsp: 按片源真实的色彩矩阵 / 量化范围做 YUV->RGB。
+     * 之前完全没设，swscale 一律走 SWS_CS_DEFAULT(=ITU601) + limited range：
+     * BT.709/2020 的片源被当成 601 转 → 偏淡；full-range 片源被当 limited 解 →
+     * 16~235 不拉伸到 0~255 → 黑不够黑、对比被压缩。两者叠加就是"软解不如硬解艳丽"。
+     * 硬解走 AV_PIX_FMT_MEDIACODEC 直投 Surface，由硬件/合成器按码流元数据处理，不受影响。 */
+    {
+        int sws_cs  = fs_sws_cs_from_frame(av_frame);
+        int src_full = (av_frame->color_range == AVCOL_RANGE_JPEG) ? 1 : 0;
+        /* 只在参数变化（或 ctx 刚重建）时设置一次，避免每帧进 sws 内部重算系数表 */
+        if (sws_cs > 0 && (opaque->sws_cs_applied != sws_cs + 1
+                           || opaque->sws_full_applied != src_full + 1)) {
+            const int *coeff = sws_getCoefficients(sws_cs);
+            if (coeff) {
+                sws_setColorspaceDetails(opaque->sws, coeff, src_full,
+                                         coeff, 1 /* dst 一定是 full range 的 RGBA */,
+                                         0, 1 << 16, 1 << 16);
+                opaque->sws_cs_applied = sws_cs + 1;
+                opaque->sws_full_applied = src_full + 1;
+            }
+        }
+        /* 诊断：色彩参数变化时打一行，便于判断某个片源到底标了什么 */
+        if (opaque->diag_cs != (int) av_frame->colorspace
+            || opaque->diag_range != (int) av_frame->color_range
+            || opaque->diag_sws_cs != sws_cs) {
+            opaque->diag_cs = (int) av_frame->colorspace;
+            opaque->diag_range = (int) av_frame->color_range;
+            opaque->diag_sws_cs = sws_cs;
+            opaque->diag_changed = 1;
+            SDL_VoutAndroid_DebugLog("softcolor cs=%d range=%d sws_cs=%d full=%d %dx%d fmt=%d",
+                                     (int) av_frame->colorspace, (int) av_frame->color_range,
+                                     sws_cs, src_full, av_frame->width, av_frame->height,
+                                     av_frame->format);
+        }
+    }
 
     const uint8_t *src_slice[4] = { av_frame->data[0], av_frame->data[1],
                                     av_frame->data[2], av_frame->data[3] };
@@ -689,6 +787,25 @@ int SDL_VoutAndroid_GetFSDiag(SDL_Vout *vout, int what)
         case 2: return opaque->diag_path;
         case 3: return opaque->diag_gate;
         case 4: return (opaque->hdr_content ? 4 : 0);
+        /* 5: 软解色彩诊断，打包位：
+         *   bit0-7  AVColorSpace (0=未标注 1=BT709 2=未定义 5=BT470BG 6=SMPTE170M 9=BT2020_NCL 10=BT2020_CL)
+         *   bit8    color_range == AVCOL_RANGE_JPEG(full) ? 1 : 0
+         *   bit9    实际使用的矩阵是否为 BT.709
+         *   bit10   实际使用的矩阵是否为 BT.2020
+         *   +10000  未设置（还没出过软解帧） */
+        case 5: {
+            if (opaque->diag_cs == 0 && opaque->diag_range == 0 && opaque->diag_sws_cs == 0
+                && opaque->diag_path != 2)
+                return 10000;
+            int v = (opaque->diag_cs & 0xff);
+            if (opaque->diag_range == AVCOL_RANGE_JPEG)
+                v |= 1 << 8;
+            if (opaque->diag_sws_cs == SWS_CS_ITU709)
+                v |= 1 << 9;
+            if (opaque->diag_sws_cs == SWS_CS_BT2020)
+                v |= 1 << 10;
+            return v;
+        }
         default: return -1;
     }
 }

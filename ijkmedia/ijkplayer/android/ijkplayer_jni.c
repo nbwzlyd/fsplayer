@@ -37,6 +37,7 @@
 #include "ijkplayer_android_def.h"
 #include "ijkplayer_android.h"
 #include "ijksdl/android/ijksdl_android_jni.h"
+#include "ijksdl/android/ijksdl_vout_android.h"
 #include "ijkavformat/ijkavformat.h"
 
 #define JNI_MODULE_PACKAGE      "com/debugly/fsplayer/player"
@@ -577,6 +578,22 @@ LABEL_RETURN:
     if (c_name)
         (*env)->ReleaseStringUTFChars(env, name, c_name);
     ijkmp_dec_ref_p(&mp);
+}
+
+static void
+FSPlayer_setDebugLogPath(JNIEnv *env, jclass clazz, jstring path)
+{
+    const char *c_path = NULL;
+    (void) clazz;
+    if (!path) {
+        SDL_VoutAndroid_SetDebugLogPath(NULL);
+        return;
+    }
+    c_path = (*env)->GetStringUTFChars(env, path, NULL);
+    if (!c_path)
+        return;
+    SDL_VoutAndroid_SetDebugLogPath(c_path);
+    (*env)->ReleaseStringUTFChars(env, path, c_path);
 }
 
 static jstring
@@ -1852,6 +1869,7 @@ static JNINativeMethod g_methods[] = {
     { "native_profileEnd",      "()V",                      (void *) FSPlayer_native_profileEnd },
 
     { "native_setLogLevel",     "(I)V",                     (void *) FSPlayer_native_setLogLevel },
+    { "native_setDebugLogPath", "(Ljava/lang/String;)V",     (void *) FSPlayer_setDebugLogPath },
     { "_setFrameAtTime",        "(Ljava/lang/String;JJII)V", (void *) FSPlayer_setFrameAtTime },
 
     /* ported from the iOS wrapper */

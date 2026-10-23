@@ -106,6 +106,10 @@
 #define FFP_PROP_INT64_FS_DIAG_PATH                     20402
 #define FFP_PROP_INT64_FS_DIAG_GATE                     20403
 #define FFP_PROP_INT64_FS_DIAG_COLOR                    20404
+/* fsp: 软解色彩诊断（colorspace / color_range / 实际矩阵），打包见 SDL_VoutAndroid_GetFSDiag(5) */
+#define FFP_PROP_INT64_FS_DIAG_SOFTCOLOR                20405
+/* fsp: native 诊断日志（fsnative.txt）开关，默认 0 关闭；仅 debug 排查时置 1 */
+#define FFP_PROP_INT64_FS_DEBUG_LOG                     20410
 
 #define FFP_PROP_INT64_ASYNC_STATISTIC_BUF_BACKWARDS    20201
 #define FFP_PROP_INT64_ASYNC_STATISTIC_BUF_FORWARDS     20202

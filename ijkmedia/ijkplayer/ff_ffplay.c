@@ -6325,6 +6325,8 @@ int64_t ffp_get_property_int64(FFPlayer *ffp, int id, int64_t default_value)
             return ffp ? SDL_VoutAndroid_GetFSDiag(ffp->vout, 2) : default_value;
         case FFP_PROP_INT64_FS_DIAG_COLOR:
             return ffp ? SDL_VoutAndroid_GetFSDiag(ffp->vout, 4) : default_value;
+        case FFP_PROP_INT64_FS_DIAG_SOFTCOLOR:
+            return ffp ? SDL_VoutAndroid_GetFSDiag(ffp->vout, 5) : default_value;
         case FFP_PROP_INT64_FS_DIAG_GATE:
             return ffp ? SDL_VoutAndroid_GetFSDiag(ffp->vout, 3) : default_value;
         case FFP_PROP_INT64_TCP_SPEED:
@@ -6410,6 +6412,11 @@ void ffp_set_property_int64(FFPlayer *ffp, int id, int64_t value)
                 }
 #endif
             }
+            break;
+        case FFP_PROP_INT64_FS_DEBUG_LOG:
+#if defined(__ANDROID__)
+            SDL_VoutAndroid_SetDebugLogEnabled((int) value);
+#endif
             break;
         default:
             break;

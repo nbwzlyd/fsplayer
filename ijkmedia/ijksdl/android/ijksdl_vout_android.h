@@ -74,8 +74,14 @@ ANativeWindow *SDL_VoutAndroid_GetNativeWindow(SDL_Vout *vout);
 /* MediaCodec 的 configure 只认 android/view/Surface；传 ANativeWindow 会被当成 ByteBuffer 模式 */
 jobject SDL_VoutAndroid_GetJavaSurface(SDL_Vout *vout);
 
-/* 临时诊断：写文件（logcat 在部分机型不可用） */
+/* 临时诊断：写文件（logcat 在部分机型不可用）。
+ * 默认【关闭】——release 包零 IO；排查时由 Java 侧 FSPlayer.setDebugLogEnabled(true) 打开。
+ * 路径必须由 Java 用 setDebugLogPath(getExternalFilesDir(null)+"/fsnative.txt") 传入：
+ * 同一份 .so 被 TV / Mobile 两个包名共用，不能在这里写死包名。 */
 void SDL_VoutAndroid_DebugLog(const char *fmt, ...);
+void SDL_VoutAndroid_SetDebugLogEnabled(int enabled);
+int  SDL_VoutAndroid_GetDebugLogEnabled(void);
+void SDL_VoutAndroid_SetDebugLogPath(const char *path);
 
 /* 直出模式不提供回读 Surface（返回 NULL）。 */
 jobject SDL_VoutAndroid_GetMediaCodecSurface(JNIEnv *env, SDL_Vout *vout);
