@@ -63,6 +63,7 @@ int SDL_VoutAndroid_IsMediaCodecSupported(SDL_Vout *vout);
 /* 「播放信息」面板用的诊断位，what 含义见 fs_vulkan_renderer_diag 的旧约定：
  * 0=AVPixelFormat 1=是否10bit 2=通路(1=mc零拷贝 2=cpu-yuv 0=未知) 3=硬解门槛 4=色彩打包 */
 int SDL_VoutAndroid_GetFSDiag(SDL_Vout *vout, int what);
+void SDL_VoutAndroid_ResetWindowGeometry(SDL_Vout *vout);
 
 /*
  * 借出 SurfaceView 的 ANativeWindow（生命周期由 vout 持有，调用方不要 release）。

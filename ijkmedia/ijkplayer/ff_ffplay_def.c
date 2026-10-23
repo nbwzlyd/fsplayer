@@ -24,6 +24,9 @@
 #include "ff_ffplay_def.h"
 #include "ff_packet_list.h"
 #include "ff_frame_queue.h"
+#if defined(__ANDROID__)
+#include "ijksdl/android/ijksdl_vout_android.h"
+#endif
 
 int decoder_init(Decoder *d, AVCodecContext *avctx, PacketQueue *queue, SDL_cond *empty_queue_cond) 
 {
@@ -211,9 +214,39 @@ int decoder_bsf_init(Decoder *d, AVCodecContext *avctx, AVStream *st)
 
 void decoder_abort(Decoder *d, FrameQueue *fq)
 {
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("da enter tid=%p", (void *)d->decoder_tid);
+#endif
     packet_queue_abort(d->queue);
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("da pktq aborted");
+#endif
     frame_queue_signal(fq);
-    SDL_WaitThread(d->decoder_tid, NULL);
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("da fq signaled");
+#endif
+    /* Unblock a MediaCodec dequeue that is waiting for an output buffer. */
+    if (d->avctx && d->avctx->codec && strstr(d->avctx->codec->name ? d->avctx->codec->name : "", "_mediacodec"))
+        avcodec_flush_buffers(d->avctx);
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("da flushed");
+#endif
+    if (d->decoder_tid) {
+        int _rc = SDL_WaitThreadTimeout(d->decoder_tid, 3000, NULL);
+#if defined(__ANDROID__)
+        SDL_VoutAndroid_DebugLog("da wait rc=%d", _rc);
+#endif
+        if (_rc != 0) {
+            /* Decoder thread is stuck in a driver/JNI call. Detach it so the
+             * MediaCodec instance can still be closed by the caller; leaving it
+             * joined would leak one instance of OMX.MS.AVC.Decoder forever
+             * (device limit: concurrent-instances=2). */
+            SDL_DetachThread(d->decoder_tid);
+        }
+    }
     d->decoder_tid = NULL;
     packet_queue_flush(d->queue);
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("da done");
+#endif
 }

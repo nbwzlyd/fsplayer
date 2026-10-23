@@ -43,6 +43,12 @@ static void *SDL_RunThread(void *data)
 #ifdef __ANDROID__
     SDL_JNI_DetachThreadEnv();
 #endif
+    /* publish completion so SDL_WaitThreadTimeout can return promptly even if
+     * the join itself would block for another reason. */
+    pthread_mutex_lock(&thread->done_mutex);
+    thread->done = 1;
+    pthread_cond_broadcast(&thread->done_cond);
+    pthread_mutex_unlock(&thread->done_mutex);
     return NULL;
 }
 
@@ -50,7 +56,10 @@ SDL_Thread *SDL_CreateThreadEx(SDL_Thread *thread, int (*fn)(void *), void *data
 {
     thread->func = fn;
     thread->data = data;
+    thread->done = 0;
     strlcpy(thread->name, name, sizeof(thread->name) - 1);
+    pthread_mutex_init(&thread->done_mutex, NULL);
+    pthread_cond_init(&thread->done_cond, NULL);
     int retval = pthread_create(&thread->id, NULL, SDL_RunThread, thread);
     if (retval)
         return NULL;
@@ -92,9 +101,46 @@ void SDL_WaitThread(SDL_Thread *thread, int *status)
         return;
 
     pthread_join(thread->id, NULL);
+    pthread_mutex_destroy(&thread->done_mutex);
+    pthread_cond_destroy(&thread->done_cond);
 
     if (status)
         *status = thread->retval;
+}
+
+int SDL_WaitThreadTimeout(SDL_Thread *thread, int timeout_ms, int *status)
+{
+    assert(thread);
+    if (!thread)
+        return -1;
+
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec  += timeout_ms / 1000;
+    ts.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec  += 1;
+        ts.tv_nsec -= 1000000000L;
+    }
+
+    pthread_mutex_lock(&thread->done_mutex);
+    while (!thread->done) {
+        int rc = pthread_cond_timedwait(&thread->done_cond, &thread->done_mutex, &ts);
+        if (rc != 0) {
+            pthread_mutex_unlock(&thread->done_mutex);
+            return -1;   /* timed out: thread is still running */
+        }
+    }
+    pthread_mutex_unlock(&thread->done_mutex);
+
+    /* the thread signalled completion; join is now guaranteed to return. */
+    pthread_join(thread->id, NULL);
+    pthread_mutex_destroy(&thread->done_mutex);
+    pthread_cond_destroy(&thread->done_cond);
+
+    if (status)
+        *status = thread->retval;
+    return 0;
 }
 
 void SDL_DetachThread(SDL_Thread *thread)

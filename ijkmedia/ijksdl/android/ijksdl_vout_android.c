@@ -21,6 +21,7 @@
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
 
+#include "ijksdl/android/ijksdl_android_jni.h"
 #include "ijksdl/android/ijksdl_vout_android.h"
 #include "ijksdl/ijksdl_vout_internal.h"
 #include "ijksdl/ijksdl_log.h"
@@ -807,6 +808,50 @@ int SDL_VoutAndroid_TakeSnapshot(SDL_Vout *vout, int type,
         usleep(10 * 1000);
     }
     return -1;
+}
+
+/*
+ * 软解路径会把窗口缓冲区几何固定成 RGBA_8888（见 vout_display_overlay_l）。
+ * 之后再切回硬解时，MediaCodec 直接往这个 Surface 输出，OMX.MS 这类解码器
+ * 会因为窗口 format 不匹配而在 configure 阶段抛 IllegalArgumentException
+ * （"Failed to configure codec ... (status = -542398553)"）。
+ * 切硬解前必须把几何重置为"由生产者决定"。
+ */
+void SDL_VoutAndroid_ResetWindowGeometry(SDL_Vout *vout)
+{
+    if (!vout || !vout->opaque)
+        return;
+    SDL_LockMutex(vout->mutex);
+    SDL_Vout_Opaque *opaque = vout->opaque;
+
+    /*
+     * 只调 setBuffersGeometry(0,0,0) 在部分实现上不生效：一旦窗口被软解
+     * connect 成 RGBA_8888，format 变更会被队列拒绝，MediaCodec 之后
+     * configure 仍会失败。彻底做法是把这个 ANativeWindow 丢掉，
+     * 从 Java Surface 重新拿一个（等价于"重新进播放页"那次为什么能好）。
+     */
+    if (opaque->jsurface) {
+        JNIEnv *env = NULL;
+        if (opaque->window) {
+            ANativeWindow_release(opaque->window);
+            opaque->window = NULL;
+        }
+        if (SDL_JNI_SetupThreadEnv(&env) == 0 && env) {
+            opaque->window = ANativeWindow_fromSurface(env, opaque->jsurface);
+        }
+        if (opaque->window) {
+            int rc = ANativeWindow_setBuffersGeometry(opaque->window, 0, 0, 0);
+            SDL_VoutAndroid_DebugLog("resetGeom win=%p rc=%d fmt=%d %dx%d", (void *) opaque->window,
+                                     rc, ANativeWindow_getFormat(opaque->window),
+                                     ANativeWindow_getWidth(opaque->window),
+                                     ANativeWindow_getHeight(opaque->window));
+        } else {
+            SDL_VoutAndroid_DebugLog("resetGeom FAILED to re-acquire window");
+        }
+        opaque->geom_w = 0;
+        opaque->geom_h = 0;
+    }
+    SDL_UnlockMutex(vout->mutex);
 }
 
 void SDL_VoutAndroid_SetDirectDecodeActive(SDL_Vout *vout, int active)

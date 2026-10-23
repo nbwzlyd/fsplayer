@@ -42,11 +42,21 @@ typedef struct SDL_Thread
     void *data;
     char name[32];
     int retval;
+    /* completion signal, so callers can wait with a timeout instead of
+     * blocking forever in pthread_join when the thread is stuck in a
+     * driver/JNI call (see SDL_WaitThreadTimeout). */
+    pthread_mutex_t done_mutex;
+    pthread_cond_t  done_cond;
+    int             done;
 } SDL_Thread;
 
 SDL_Thread *SDL_CreateThreadEx(SDL_Thread *thread, int (*fn)(void *), void *data, const char *name);
 int         SDL_SetThreadPriority(SDL_ThreadPriority priority);
 void        SDL_WaitThread(SDL_Thread *thread, int *status);
 void        SDL_DetachThread(SDL_Thread *thread);
+/* Bounded wait. Returns 0 if the thread finished within timeout_ms; -1 on
+ * timeout. On timeout the caller must NOT free data the thread may still
+ * touch; the thread handle stays registered so a later call can retry. */
+int         SDL_WaitThreadTimeout(SDL_Thread *thread, int timeout_ms, int *status);
 
 #endif

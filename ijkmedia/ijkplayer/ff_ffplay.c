@@ -34,6 +34,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <string.h>
 
 #include "libavutil/avstring.h"
 #include "libavutil/mathematics.h"
@@ -650,9 +651,21 @@ static void stream_component_close(FFPlayer *ffp, int stream_index)
         is->audio_buf = NULL;
         break;
     case AVMEDIA_TYPE_VIDEO:
+#if defined(__ANDROID__)
+        SDL_VoutAndroid_DebugLog("cl.scc vid enter idx=%d", stream_index);
+#endif
         decoder_abort(&is->viddec, &is->pictq);
+#if defined(__ANDROID__)
+        SDL_VoutAndroid_DebugLog("cl.scc vid abort done");
+#endif
         decoder_destroy(&is->viddec);
+#if defined(__ANDROID__)
+        SDL_VoutAndroid_DebugLog("cl.scc vid destroy done pictq=%d", is->pictq.size);
+#endif
         ffpipenode_free_p(&ffp->node_vdec);
+#if defined(__ANDROID__)
+        SDL_VoutAndroid_DebugLog("cl.scc vid pipenode freed");
+#endif
         break;
     default:
         break;
@@ -680,12 +693,18 @@ static void stream_close(FFPlayer *ffp)
 {
     av_log(NULL, AV_LOG_INFO, "stream_close will close\n");
     VideoState *is = ffp->is;
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("cl.sc enter is=%p vid=%d aud=%d", (void*)is, is->video_stream, is->audio_stream);
+#endif
     /* XXX: use a special url_shutdown call to abort parse cleanly */
     is->abort_request = 1;
     packet_queue_abort(&is->videoq);
     packet_queue_abort(&is->audioq);
     ff_sub_abort(is->ffSub);
     SDL_WaitThread(is->read_tid, NULL);
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("cl.sc read_tid joined");
+#endif
     /* close each stream */
     if (is->audio_stream >= 0)
         stream_component_close(ffp, is->audio_stream);
@@ -695,7 +714,13 @@ static void stream_close(FFPlayer *ffp)
     avformat_close_input(&is->ic);
     
     av_log(NULL, AV_LOG_DEBUG, "wait for video_refresh_tid\n");
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("cl.sc ic closed, wait vrefresh");
+#endif
     SDL_WaitThread(is->video_refresh_tid, NULL);
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("cl.sc vrefresh joined pictq=%d", is->pictq.size);
+#endif
     ff_sub_destroy(&is->ffSub);
     
     packet_queue_destroy(&is->videoq);
@@ -703,7 +728,13 @@ static void stream_close(FFPlayer *ffp)
 
     /* free all pictures */
     frame_queue_destroy(&is->pictq);
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("cl.sc pictq destroyed");
+#endif
     frame_queue_destroy(&is->sampq);
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("cl.sc sampq destroyed");
+#endif
     
     ffp_stop_mux(ffp);
     ffp_stop_recorder(ffp);
@@ -3428,13 +3459,22 @@ static void mediacodec_device_free(AVHWDeviceContext *ctx)
 static int ffp_android_mediacodec_init(FFPlayer *ffp, AVCodecContext *avctx, const AVCodec *codec)
 {
     if (!ffp->vout || !SDL_VoutAndroid_IsMediaCodecSupported(ffp->vout)) {
+        SDL_VoutAndroid_DebugLog("mcInit FAIL gate vout=%p supported=%d",
+                                 (void *) ffp->vout,
+                                 ffp->vout ? SDL_VoutAndroid_IsMediaCodecSupported(ffp->vout) : -1);
         ALOGW("android: mediacodec zero-copy unsupported by vout\n");
         return -1;
     }
 
+    /* 软解会把 Surface 缓冲几何锁成 RGBA_8888；切回硬解前必须重置，
+     * 否则 MediaCodec.configure 会因窗口 format 不匹配被硬件解码器拒绝。 */
+    SDL_VoutAndroid_ResetWindowGeometry(ffp->vout);
+
     enum AVHWDeviceType type = av_hwdevice_find_type_by_name("mediacodec");
-    if (type == AV_HWDEVICE_TYPE_NONE)
+    if (type == AV_HWDEVICE_TYPE_NONE) {
+        SDL_VoutAndroid_DebugLog("mcInit FAIL notype");
         return -1;
+    }
 
     const AVCodecHWConfig *config = NULL;
     for (int i = 0;; i++) {
@@ -3448,6 +3488,7 @@ static int ffp_android_mediacodec_init(FFPlayer *ffp, AVCodecContext *avctx, con
         }
     }
     if (!config) {
+        SDL_VoutAndroid_DebugLog("mcInit FAIL nocfg codec=%s", codec ? codec->name : "?");
         ALOGI("android: %s does not support mediacodec\n", codec->name);
         return -1;
     }
@@ -3467,12 +3508,16 @@ static int ffp_android_mediacodec_init(FFPlayer *ffp, AVCodecContext *avctx, con
      */
     jobject jsurface = SDL_VoutAndroid_GetJavaSurface(ffp->vout);
     ANativeWindow *window = jsurface ? NULL : SDL_VoutAndroid_GetNativeWindow(ffp->vout);
-    if (!jsurface && !window)
+    if (!jsurface && !window) {
+        SDL_VoutAndroid_DebugLog("mcInit FAIL nosurface jsurface=%p", (void *) jsurface);
         return -1;
+    }
 
     AVBufferRef *device_ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_MEDIACODEC);
-    if (!device_ref)
+    if (!device_ref) {
+        SDL_VoutAndroid_DebugLog("mcInit FAIL allocdev");
         return -1;
+    }
 
     AVHWDeviceContext *dev_ctx = (AVHWDeviceContext *) device_ref->data;
     AVMediaCodecDeviceContext *hwctx = dev_ctx->hwctx;
@@ -3484,11 +3529,33 @@ static int ffp_android_mediacodec_init(FFPlayer *ffp, AVCodecContext *avctx, con
     }
     SDL_VoutAndroid_DebugLog("mcInit surface=%p win=%p codec=%s", (void *) jsurface, (void *) window,
                              codec ? codec->name : "?");
+#if defined(__ANDROID__)
+    if (jsurface) {
+        JNIEnv *denv = NULL;
+        if (SDL_JNI_SetupThreadEnv(&denv) == 0 && denv) {
+            jclass scls = (*denv)->GetObjectClass(denv, jsurface);
+            if (scls) {
+                jmethodID valid_mid = (*denv)->GetMethodID(denv, scls, "isValid", "()Z");
+                jmethodID str_mid = (*denv)->GetMethodID(denv, scls, "toString", "()Ljava/lang/String;");
+                jboolean sv = valid_mid ? (*denv)->CallBooleanMethod(denv, jsurface, valid_mid) : (jboolean) -1;
+                jstring sstr = str_mid ? (jstring) (*denv)->CallObjectMethod(denv, jsurface, str_mid) : NULL;
+                const char *scstr = NULL;
+                if (sstr) scstr = (*denv)->GetStringUTFChars(denv, sstr, NULL);
+                SDL_VoutAndroid_DebugLog("mcSurface valid=%d str=%s", (int) sv, scstr ? scstr : "?");
+                if (scstr) (*denv)->ReleaseStringUTFChars(denv, sstr, scstr);
+                if (sstr) (*denv)->DeleteLocalRef(denv, sstr);
+                (*denv)->DeleteLocalRef(denv, scls);
+                if ((*denv)->ExceptionCheck(denv)) (*denv)->ExceptionClear(denv);
+            }
+        }
+    }
+#endif
 
     /* FFmpeg 解码时会自行再取一份 global ref；这一份由我们在 device 释放时回收。 */
     dev_ctx->free = mediacodec_device_free;
 
     if (av_hwdevice_ctx_init(device_ref) < 0) {
+        SDL_VoutAndroid_DebugLog("mcInit FAIL devinit");
         av_buffer_unref(&device_ref);
         return -1;
     }
@@ -3688,11 +3755,24 @@ static int stream_component_open(FFPlayer *ffp, int stream_index)
      * 原生 h264/hevc 等解码器的 hw_configs 里不含 MediaCodec。
      * 其解码输出目标是渲染器内部的 AImageReader Surface（零拷贝源头）。
      */
+    SDL_VoutAndroid_DebugLog("mcDecide type=%d id=%d wanted=%d forced=%s attpic=%d"
+                             " all=%d avc=%d hevc=%d m2=%d m4=%d",
+                             (int) avctx->codec_type, (int) avctx->codec_id,
+                             ffp_android_mediacodec_wanted(ffp, avctx->codec_id),
+                             forced_codec_name ? forced_codec_name : "(null)",
+                             (st->disposition & AV_DISPOSITION_ATTACHED_PIC) ? 1 : 0,
+                             ffp->mediacodec_all_videos, ffp->mediacodec_avc,
+                             ffp->mediacodec_hevc, ffp->mediacodec_mpeg2, ffp->mediacodec_mpeg4);
     if (!forced_codec_name && avctx->codec_type == AVMEDIA_TYPE_VIDEO &&
         !(st->disposition & AV_DISPOSITION_ATTACHED_PIC) &&
         ffp_android_mediacodec_wanted(ffp, avctx->codec_id)) {
         const char *mc_name = ffp_android_mediacodec_decoder_name(avctx->codec_id);
         const AVCodec *mc_codec = mc_name ? avcodec_find_decoder_by_name(mc_name) : NULL;
+        SDL_VoutAndroid_DebugLog("mcSel id=%d all=%d avc=%d hevc=%d forced=%d name=%s found=%d",
+                                 (int) avctx->codec_id, ffp->mediacodec_all_videos,
+                                 ffp->mediacodec_avc, ffp->mediacodec_hevc,
+                                 forced_codec_name ? 1 : 0,
+                                 mc_name ? mc_name : "(null)", mc_codec ? 1 : 0);
         if (mc_codec) {
             codec = mc_codec;
             ALOGI("android: use %s\n", mc_name);
@@ -3782,6 +3862,13 @@ static int stream_component_open(FFPlayer *ffp, int stream_index)
      * 播放体验等同「软解」，而不是直接报错。
      */
     if (ret < 0 && mediacodec_attached) {
+        char mcerr[AV_ERROR_MAX_STRING_SIZE] = {0};
+        av_strerror(ret, mcerr, sizeof(mcerr));
+        SDL_VoutAndroid_DebugLog("mcOpenFail name=%s ret=%d(%s) prof=%d lvl=%d %dx%d ex=%d",
+                                 codec->name, ret, mcerr,
+                                 avctx->profile, avctx->level,
+                                 avctx->coded_width, avctx->coded_height,
+                                 avctx->extradata_size);
         ALOGW("android: %s open failed (%d), fallback to software decoder\n",
               codec->name, ret);
         av_buffer_unref(&avctx->hw_device_ctx);
@@ -5043,6 +5130,23 @@ inline static int log_level_ijk_to_av(int ijk_level)
 
 static void ffp_log_callback_brief(void *ptr, int level, const char *fmt, va_list vl)
 {
+#if defined(__ANDROID__)
+    /* 诊断镜像：即使全局静音，也把 ERROR/WARNING 落进 fsnative.txt（限量防刷屏） */
+    if (level <= AV_LOG_WARNING) {
+        static int s_avlog_lines = 0;
+        if (s_avlog_lines < 400) {
+            char dbgline[512];
+            va_list vdbg;
+            va_copy(vdbg, vl);
+            vsnprintf(dbgline, sizeof(dbgline), fmt, vdbg);
+            va_end(vdbg);
+            dbgline[strcspn(dbgline, "\n")] = '\0';
+            SDL_VoutAndroid_DebugLog("avlog[%d] %s", level, dbgline);
+            s_avlog_lines++;
+        }
+    }
+#endif
+
     if (level > av_log_get_level())
         return;
 
@@ -5225,10 +5329,16 @@ void ffp_destroy(FFPlayer *ffp)
     if (!ffp)
         return;
 
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("cl.destroy enter ffp=%p", (void*)ffp);
+#endif
     pthread_mutex_lock(&g_ffp_destroy_mutex);
     if (g_ffp_destroying == ffp) {
         /* 已有另一个线程在销毁同一个 ffp，直接返回，不要碰任何字段 */
         pthread_mutex_unlock(&g_ffp_destroy_mutex);
+#if defined(__ANDROID__)
+        SDL_VoutAndroid_DebugLog("cl.destroy reentry skip");
+#endif
         return;
     }
     g_ffp_destroying = ffp;
@@ -5239,6 +5349,9 @@ void ffp_destroy(FFPlayer *ffp)
         stream_close(ffp);
         ffp->is = NULL;
     }
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("cl.destroy stream closed, free vout/aout");
+#endif
 
     SDL_VoutFreeP(&ffp->vout);
     SDL_AoutFreeP(&ffp->aout);
@@ -5441,6 +5554,13 @@ int ffp_prepare_async_l(FFPlayer *ffp, const char *file_name)
     av_log(NULL, AV_LOG_INFO, "===================\n");
 
     av_opt_set_dict(ffp, &ffp->player_opts);
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("mcOpts applied all=%d avc=%d hevc=%d m2=%d m4=%d autorot=%d reschg=%d vcodec=%s",
+                             ffp->mediacodec_all_videos, ffp->mediacodec_avc, ffp->mediacodec_hevc,
+                             ffp->mediacodec_mpeg2, ffp->mediacodec_mpeg4,
+                             ffp->mediacodec_auto_rotate, ffp->mediacodec_handle_resolution_change,
+                             ffp->video_codec_name ? ffp->video_codec_name : "(null)");
+#endif
     if (!ffp->aout) {
         ffp->aout = ffpipeline_open_audio_output(ffp->pipeline, ffp);
         if (!ffp->aout)
@@ -5535,11 +5655,17 @@ int ffp_wait_stop_l(FFPlayer *ffp)
 {
     assert(ffp);
 
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("cl.waitstop enter is=%p", (void*)ffp->is);
+#endif
     if (ffp->is) {
         ffp_stop_l(ffp);
         stream_close(ffp);
         ffp->is = NULL;
     }
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("cl.waitstop done");
+#endif
     return 0;
 }
 
@@ -6002,6 +6128,9 @@ int ffp_set_stream_selected(FFPlayer *ffp, int stream, int selected)
 
 int ffp_reload_video_stream(FFPlayer *ffp)
 {
+#if defined(__ANDROID__)
+    SDL_VoutAndroid_DebugLog("reloadV enter");
+#endif
     VideoState *is = ffp->is;
     if (!is)
         return -1;
@@ -6041,6 +6170,9 @@ int ffp_reload_video_stream(FFPlayer *ffp)
             stream_component_close(ffp, is->video_stream);
         }
         int opened = stream_component_open(ffp, stream) == 0;
+#if defined(__ANDROID__)
+        SDL_VoutAndroid_DebugLog("reloadV open stream=%d ok=%d", stream, opened);
+#endif
         if (opened) {
             // 2. Seek back to current position to trigger decoding from nearest keyframe
             ffp_seek_to_l(ffp, current_pos);
